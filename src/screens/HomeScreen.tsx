@@ -1,0 +1,639 @@
+// src/screens/HomeScreen.tsx
+import React, { useRef, useState } from 'react';
+import {
+  View, Text, StyleSheet, TouchableOpacity, StatusBar,
+  Platform, Animated, Easing, ActivityIndicator, ScrollView, Dimensions,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import { Feather } from '@expo/vector-icons';
+import { useAuth } from '../context/AuthContext';
+import { supabase } from '../lib/supabase';
+
+const ACCENT        = '#3B6FD4';
+const ACCENT_DIM    = 'rgba(59,111,212,0.10)';
+const ACCENT_BORDER = 'rgba(59,111,212,0.22)';
+const SUCCESS       = '#34C78A';
+const DANGER        = '#FF5252';
+const CARD_BG       = 'rgba(255,255,255,0.035)';
+const { width: SW } = Dimensions.get('window');
+
+type PickedFile     = { name: string; uri: string; size: number; mimeType: string };
+type UploadState    = 'idle' | 'uploading' | 'analyzing' | 'done' | 'error';
+type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz';
+type Concept        = { term: string; definition: string };
+type Flashcard      = { question: string; answer: string };
+type QuizItem       = { question: string; options: string[]; correctIndex: number; explanation: string };
+type AnalysisResult = { summary: string; keyConceptsList: Concept[]; flashcards: Flashcard[]; quiz: QuizItem[] };
+
+function formatBytes(b: number) {
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ── Flashcard ─────────────────────────────────────────────────────────────────
+function FlashCard({ card }: { card: Flashcard }) {
+  const [flipped, setFlipped] = useState(false);
+  return (
+    <TouchableOpacity
+      style={[styles.flashCard, flipped && styles.flashCardFlipped]}
+      onPress={() => setFlipped(!flipped)}
+      activeOpacity={0.85}
+    >
+      <Text style={styles.flashCardHint}>{flipped ? 'Answer' : 'Question'}</Text>
+      <Text style={styles.flashCardText}>{flipped ? card.answer : card.question}</Text>
+      <Text style={styles.flashCardTap}>Tap to {flipped ? 'see question' : 'reveal answer'}</Text>
+    </TouchableOpacity>
+  );
+}
+
+// ── Quiz card ─────────────────────────────────────────────────────────────────
+function QuizCard({ item, index }: { item: QuizItem; index: number }) {
+  const [selected, setSelected] = useState<number | null>(null);
+  return (
+    <View style={styles.quizCard}>
+      <Text style={styles.quizQuestion}>{index + 1}. {item.question}</Text>
+      <View style={styles.quizOptions}>
+        {item.options.map((opt, i) => {
+          const isCorrect  = i === item.correctIndex;
+          const isSelected = selected === i;
+          let bg = 'rgba(255,255,255,0.04)', border = 'rgba(255,255,255,0.08)', color = 'rgba(255,255,255,0.75)';
+          if (selected !== null) {
+            if (isCorrect)       { bg = 'rgba(52,199,138,0.12)'; border = SUCCESS; color = SUCCESS; }
+            else if (isSelected) { bg = 'rgba(255,82,82,0.10)';  border = DANGER;  color = DANGER;  }
+          }
+          return (
+            <TouchableOpacity key={i}
+              style={[styles.quizOption, { backgroundColor: bg, borderColor: border }]}
+              onPress={() => { if (selected === null) setSelected(i); }}
+              activeOpacity={0.8} disabled={selected !== null}
+            >
+              <Text style={[styles.quizOptionLetter, { color }]}>{String.fromCharCode(65 + i)}</Text>
+              <Text style={[styles.quizOptionText, { color }]}>{opt}</Text>
+              {selected !== null && isCorrect    && <Feather name="check-circle" size={14} color={SUCCESS} />}
+              {selected !== null && isSelected && !isCorrect && <Feather name="x-circle" size={14} color={DANGER} />}
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+      {selected !== null && (
+        <View style={styles.quizExplanation}>
+          <Feather name="info" size={12} color="rgba(255,255,255,0.35)" />
+          <Text style={styles.quizExplanationText}>{item.explanation}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+// ── Main Screen ───────────────────────────────────────────────────────────────
+export default function HomeScreen() {
+  const { profile, user } = useAuth();
+  const initials  = profile ? `${profile.first_name[0]}${profile.last_name[0]}`.toUpperCase() : '?';
+
+  const [pickedFile,  setPickedFile]  = useState<PickedFile | null>(null);
+  const [uploadState, setUploadState] = useState<UploadState>('idle');
+  const [errorMsg,    setErrorMsg]    = useState('');
+  const [result,      setResult]      = useState<AnalysisResult | null>(null);
+  const [activeView,  setActiveView]  = useState<ActiveView>(null);
+
+  const cardScale    = useRef(new Animated.Value(1)).current;
+  const progressAnim = useRef(new Animated.Value(0)).current;
+  const doneAnim     = useRef(new Animated.Value(0)).current;
+
+  const bumpScale = () => {
+    Animated.sequence([
+      Animated.timing(cardScale, { toValue: 0.97, duration: 90, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.spring(cardScale, { toValue: 1, tension: 220, friction: 9, useNativeDriver: true }),
+    ]).start();
+  };
+
+  const animateProgress = (to: number) =>
+    Animated.timing(progressAnim, { toValue: to, duration: 400, easing: Easing.out(Easing.cubic), useNativeDriver: false }).start();
+
+  const showDoneBanner = () => {
+    doneAnim.setValue(0);
+    Animated.spring(doneAnim, { toValue: 1, tension: 120, friction: 10, useNativeDriver: true }).start();
+  };
+
+  const handlePick = async () => {
+    bumpScale();
+    const res = await DocumentPicker.getDocumentAsync({
+      type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+      copyToCacheDirectory: true,
+    });
+    if (!res.canceled) {
+      const asset = res.assets[0];
+      setPickedFile({ name: asset.name, uri: asset.uri, size: asset.size ?? 0, mimeType: asset.mimeType ?? 'application/octet-stream' });
+      setUploadState('idle');
+      setResult(null);
+      setActiveView(null);
+      setErrorMsg('');
+      progressAnim.setValue(0);
+      doneAnim.setValue(0);
+    }
+  };
+
+  const handleRemove = () => {
+    setPickedFile(null);
+    setUploadState('idle');
+    setResult(null);
+    setActiveView(null);
+    setErrorMsg('');
+    progressAnim.setValue(0);
+    doneAnim.setValue(0);
+  };
+
+  const handleAnalyze = async () => {
+    if (!pickedFile || !user) return;
+    try {
+      setUploadState('uploading');
+      animateProgress(0.15);
+      const ext = pickedFile.name.split('.').pop();
+      const storagePath = `${user.id}/${Date.now()}.${ext}`;
+      const base64 = await FileSystem.readAsStringAsync(pickedFile.uri, { encoding: FileSystem.EncodingType.Base64 });
+      animateProgress(0.35);
+      const byteCharacters = atob(base64);
+      const byteArray = new Uint8Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) byteArray[i] = byteCharacters.charCodeAt(i);
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('study-materials').upload(storagePath, byteArray, { contentType: pickedFile.mimeType, upsert: false });
+      if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
+      animateProgress(0.55);
+      setUploadState('analyzing');
+      animateProgress(0.75);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error('No active session.');
+      const { data: fnData, error: fnError } = await supabase.functions.invoke('analyze-material', {
+        body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id },
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (fnError) throw new Error(`Analysis failed: ${fnError.message}`);
+      if (!fnData?.success) throw new Error(fnData?.error ?? 'Analysis returned no data');
+      animateProgress(1);
+      setResult({ summary: fnData.summary, keyConceptsList: fnData.keyConceptsList ?? [], flashcards: fnData.flashcards ?? [], quiz: fnData.quiz ?? [] });
+      setUploadState('done');
+      setActiveView(null); // reset — user must pick a card
+      showDoneBanner();
+    } catch (err: any) {
+      setUploadState('error');
+      setErrorMsg(err?.message ?? 'Something went wrong.');
+      animateProgress(0);
+    }
+  };
+
+  const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
+
+  const OUTPUT_CARDS = [
+    { key: 'summary'   as ActiveView, icon: 'align-left',   label: 'Summary',    desc: 'Document overview',   count: null },
+    { key: 'concepts'  as ActiveView, icon: 'tag',           label: 'Concepts',   desc: 'Key terms & ideas',   count: result?.keyConceptsList.length },
+    { key: 'flashcards'as ActiveView, icon: 'layers',        label: 'Flashcards', desc: 'Q&A study cards',     count: result?.flashcards.length },
+    { key: 'quiz'      as ActiveView, icon: 'check-square',  label: 'Quiz',       desc: 'Test your knowledge', count: result?.quiz.length },
+  ];
+
+  return (
+    <View style={styles.container}>
+      <StatusBar barStyle="light-content" />
+      <View style={[styles.blob, { top: -80, left: -60 }]} />
+      <View style={[styles.blob, { top: 280, right: -80, width: 260, height: 260 }]} />
+
+      <SafeAreaView style={styles.safe}>
+        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+
+          {/* ── Header ── */}
+          <View style={styles.header}>
+            <View style={styles.headerLeft}>
+              <Text style={styles.appName}>studia</Text>
+              <View style={styles.onlineDot} />
+            </View>
+            <View style={styles.avatar}>
+              <Text style={styles.avatarText}>{initials}</Text>
+            </View>
+          </View>
+
+          {/* ── IDLE: no file ── */}
+          {!pickedFile && (
+            <>
+              <Animated.View style={[styles.uploadCard, { transform: [{ scale: cardScale }] }]}>
+                <TouchableOpacity style={styles.uploadTouchable} onPress={handlePick} activeOpacity={1}>
+                  <View style={styles.gridLines} pointerEvents="none">
+                    {[0,1,2,3].map(i => <View key={`h${i}`} style={[styles.gridLine,  { top:  `${25*(i+1)}%` as any }]} />)}
+                    {[0,1,2,3].map(i => <View key={`v${i}`} style={[styles.gridLineV, { left: `${25*(i+1)}%` as any }]} />)}
+                  </View>
+                  <View style={styles.uploadCenter}>
+                    <View style={styles.uploadIconOuter}>
+                      <View style={styles.uploadIconInner}>
+                        <Feather name="upload-cloud" size={36} color={ACCENT} />
+                      </View>
+                    </View>
+                    <Text style={styles.uploadTitle}>Drop your file here</Text>
+                    <View style={styles.formatRow}>
+                      <View style={styles.formatPill}><Text style={styles.formatText}>PDF</Text></View>
+                      <View style={styles.formatDivider} />
+                      <View style={styles.formatPill}><Text style={styles.formatText}>DOCX</Text></View>
+                    </View>
+                  </View>
+                  <View style={styles.uploadBottom}>
+                    <Feather name="lock" size={11} color="rgba(255,255,255,0.2)" />
+                    <Text style={styles.uploadBottomText}>Files are processed securely</Text>
+                  </View>
+                </TouchableOpacity>
+              </Animated.View>
+
+              {/* Feature strip */}
+              <View style={styles.featureRow}>
+                {OUTPUT_CARDS.map((c) => (
+                  <View key={c.key} style={styles.featureCard}>
+                    <View style={styles.featureIconWrap}>
+                      <Feather name={c.icon as any} size={15} color={ACCENT} />
+                    </View>
+                    <Text style={styles.featureLabel}>{c.label}</Text>
+                  </View>
+                ))}
+              </View>
+
+              {/* How it works */}
+              <View style={styles.howCard}>
+                <Text style={styles.howTitle}>How it works</Text>
+                <View style={styles.howSteps}>
+                  {[
+                    { num: '1', icon: 'upload',    text: 'Upload a PDF or DOCX' },
+                    { num: '2', icon: 'cpu',       text: 'AI analyzes your material' },
+                    { num: '3', icon: 'book-open', text: 'Pick a format and study' },
+                  ].map((step, i) => (
+                    <View key={i} style={styles.howStep}>
+                      <View style={styles.howNum}><Text style={styles.howNumText}>{step.num}</Text></View>
+                      <View style={styles.howIconWrap}><Feather name={step.icon as any} size={14} color={ACCENT} /></View>
+                      <Text style={styles.howText}>{step.text}</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            </>
+          )}
+
+          {/* ── File attached ── */}
+          {pickedFile && (
+            <View style={styles.section}>
+
+              {/* File card */}
+              <View style={styles.attachCard}>
+                <View style={styles.fileRow}>
+                  <View style={styles.fileIconWrap}>
+                    <Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={20} color={ACCENT} />
+                  </View>
+                  <View style={styles.fileMeta}>
+                    <Text style={styles.fileName} numberOfLines={1} ellipsizeMode="middle">{pickedFile.name}</Text>
+                    <Text style={styles.fileSize}>{formatBytes(pickedFile.size)}</Text>
+                  </View>
+                  {!isWorking && uploadState !== 'done' && (
+                    <TouchableOpacity style={styles.removeBtn} onPress={handleRemove} hitSlop={{ top:8, bottom:8, left:8, right:8 }}>
+                      <Feather name="x" size={14} color="rgba(255,255,255,0.35)" />
+                    </TouchableOpacity>
+                  )}
+                  {uploadState === 'done' && (
+                    <View style={styles.successBadge}><Feather name="check" size={13} color={SUCCESS} /></View>
+                  )}
+                </View>
+
+                {(isWorking || uploadState === 'done') && (
+                  <View style={styles.progressTrack}>
+                    <Animated.View style={[styles.progressFill, {
+                      backgroundColor: uploadState === 'done' ? SUCCESS : ACCENT,
+                      width: progressAnim.interpolate({ inputRange: [0,1], outputRange: ['0%','100%'] }),
+                    }]} />
+                  </View>
+                )}
+
+                {isWorking && (
+                  <View style={styles.statusRow}>
+                    <ActivityIndicator size="small" color={ACCENT} />
+                    <Text style={styles.statusText}>
+                      {uploadState === 'uploading' ? 'Uploading...' : 'AI is reading your document...'}
+                    </Text>
+                  </View>
+                )}
+
+                {uploadState === 'error' && (
+                  <View style={styles.errorRow}>
+                    <Feather name="alert-circle" size={13} color={DANGER} />
+                    <Text style={styles.errorText}>{errorMsg}</Text>
+                  </View>
+                )}
+
+                {!isWorking && (
+                  <View style={styles.actionRow}>
+                    {uploadState !== 'done' && (
+                      <TouchableOpacity style={styles.secondaryBtn} onPress={handlePick}>
+                        <Feather name="refresh-ccw" size={13} color="rgba(255,255,255,0.5)" />
+                        <Text style={styles.secondaryBtnText}>Change</Text>
+                      </TouchableOpacity>
+                    )}
+                    {uploadState === 'done' ? (
+                      <TouchableOpacity style={[styles.primaryBtn, { flex:1 }]} onPress={handleRemove}>
+                        <Feather name="plus" size={15} color="#fff" />
+                        <Text style={styles.primaryBtnText}>New upload</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity
+                        style={[styles.primaryBtn, uploadState === 'error' && { backgroundColor: '#C0392B' }]}
+                        onPress={handleAnalyze}
+                      >
+                        <Feather name={uploadState === 'error' ? 'rotate-cw' : 'zap'} size={15} color="#fff" />
+                        <Text style={styles.primaryBtnText}>{uploadState === 'error' ? 'Retry' : 'Analyze'}</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                )}
+              </View>
+
+              {/* ── Done banner ── */}
+              {result && uploadState === 'done' && (
+                <Animated.View style={[styles.doneBanner, {
+                  opacity: doneAnim,
+                  transform: [{ translateY: doneAnim.interpolate({ inputRange:[0,1], outputRange:[12,0] }) }],
+                }]}>
+                  <View style={styles.doneBannerLeft}>
+                    <View style={styles.doneIconWrap}>
+                      <Feather name="check-circle" size={18} color={SUCCESS} />
+                    </View>
+                    <View>
+                      <Text style={styles.doneBannerTitle}>Analysis complete</Text>
+                      <Text style={styles.doneBannerSub}>Select a format below to study</Text>
+                    </View>
+                  </View>
+                  <View style={styles.doneStatRow}>
+                    <Text style={styles.doneStat}>{result.flashcards.length} cards</Text>
+                    <View style={styles.doneStatDot} />
+                    <Text style={styles.doneStat}>{result.quiz.length} quiz</Text>
+                  </View>
+                </Animated.View>
+              )}
+
+              {/* ── Output selection cards ── */}
+              {result && uploadState === 'done' && activeView === null && (
+                <View style={styles.outputGrid}>
+                  {OUTPUT_CARDS.map((card) => (
+                    <TouchableOpacity
+                      key={card.key}
+                      style={styles.outputCard}
+                      onPress={() => setActiveView(card.key)}
+                      activeOpacity={0.8}
+                    >
+                      <View style={styles.outputCardTop}>
+                        <View style={styles.outputIconWrap}>
+                          <Feather name={card.icon as any} size={20} color={ACCENT} />
+                        </View>
+                        <Feather name="arrow-right" size={14} color="rgba(255,255,255,0.2)" />
+                      </View>
+                      <Text style={styles.outputCardLabel}>{card.label}</Text>
+                      <Text style={styles.outputCardDesc}>{card.desc}</Text>
+                      {card.count != null && (
+                        <View style={styles.outputCardCount}>
+                          <Text style={styles.outputCardCountText}>{card.count} items</Text>
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+
+              {/* ── Active content view ── */}
+              {result && activeView !== null && (
+                <View style={styles.contentSection}>
+                  {/* Back + title bar */}
+                  <View style={styles.contentHeader}>
+                    <TouchableOpacity style={styles.backBtn} onPress={() => setActiveView(null)}>
+                      <Feather name="arrow-left" size={15} color="rgba(255,255,255,0.6)" />
+                    </TouchableOpacity>
+                    <Text style={styles.contentTitle}>
+                      {activeView === 'summary'    ? 'Summary'
+                      : activeView === 'concepts'  ? `Key Concepts · ${result.keyConceptsList.length}`
+                      : activeView === 'flashcards'? `Flashcards · ${result.flashcards.length}`
+                      :                              `Quiz · ${result.quiz.length}`}
+                    </Text>
+                  </View>
+
+                  {/* Summary */}
+                  {activeView === 'summary' && (
+                    <View style={styles.summaryBox}>
+                      <Text style={styles.summaryText}>{result.summary}</Text>
+                    </View>
+                  )}
+
+                  {/* Concepts */}
+                  {activeView === 'concepts' && (
+                    <View style={styles.conceptsList}>
+                      {result.keyConceptsList.map((c, i) => (
+                        <View key={i} style={styles.conceptItem}>
+                          <View style={styles.conceptDot} />
+                          <View style={styles.conceptContent}>
+                            <Text style={styles.conceptTerm}>{c.term}</Text>
+                            <Text style={styles.conceptDef}>{c.definition}</Text>
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {/* Flashcards */}
+                  {activeView === 'flashcards' && (
+                    <View style={styles.flashList}>
+                      <View style={styles.hintRow}>
+                        <Feather name="rotate-cw" size={11} color="rgba(255,255,255,0.25)" />
+                        <Text style={styles.hintText}>Tap a card to flip</Text>
+                      </View>
+                      {result.flashcards.map((fc, i) => <FlashCard key={i} card={fc} />)}
+                    </View>
+                  )}
+
+                  {/* Quiz */}
+                  {activeView === 'quiz' && (
+                    <View style={styles.quizList}>
+                      <View style={styles.hintRow}>
+                        <Feather name="target" size={11} color="rgba(255,255,255,0.25)" />
+                        <Text style={styles.hintText}>Tap an option to answer</Text>
+                      </View>
+                      {result.quiz.map((q, i) => <QuizCard key={i} item={q} index={i} />)}
+                    </View>
+                  )}
+                </View>
+              )}
+
+            </View>
+          )}
+
+        </ScrollView>
+      </SafeAreaView>
+    </View>
+  );
+}
+
+// ── Styles ────────────────────────────────────────────────────────────────────
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#0C0D12' },
+  blob: { position: 'absolute', width: 340, height: 340, borderRadius: 170, backgroundColor: 'rgba(59,111,212,0.06)' },
+  safe:   { flex: 1 },
+  scroll: { flexGrow: 1, paddingBottom: 56 },
+
+  header: {
+    paddingHorizontal: 24, paddingTop: 14, paddingBottom: 6,
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+  },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  appName: {
+    fontSize: 20, fontWeight: '800', color: '#FFFFFF', letterSpacing: -0.8,
+    fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }),
+  },
+  onlineDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: SUCCESS, marginBottom: 8 },
+  avatar: {
+    width: 38, height: 38, borderRadius: 19,
+    backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  avatarText: {
+    fontSize: 13, fontWeight: '700', color: ACCENT, letterSpacing: 0.5,
+    fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }),
+  },
+
+  // Upload card
+  uploadCard: {
+    marginHorizontal: 24, marginTop: 10,
+    height: SW * 0.72, borderRadius: 24,
+    backgroundColor: 'rgba(59,111,212,0.05)',
+    borderWidth: 1.5, borderColor: ACCENT_BORDER,
+    borderStyle: 'dashed', overflow: 'hidden',
+  },
+  uploadTouchable: { flex: 1 },
+  gridLines:  { ...StyleSheet.absoluteFillObject },
+  gridLine:   { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: 'rgba(59,111,212,0.07)' },
+  gridLineV:  { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: 'rgba(59,111,212,0.07)' },
+  uploadCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
+  uploadIconOuter: {
+    width: 100, height: 100, borderRadius: 50,
+    backgroundColor: 'rgba(59,111,212,0.08)', borderWidth: 1, borderColor: 'rgba(59,111,212,0.15)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  uploadIconInner: {
+    width: 72, height: 72, borderRadius: 36,
+    backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  uploadTitle: {
+    fontSize: 18, fontWeight: '600', color: 'rgba(255,255,255,0.75)', letterSpacing: -0.3,
+    fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }),
+  },
+  formatRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  formatPill: { paddingHorizontal: 14, paddingVertical: 5, borderRadius: 20, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER },
+  formatText: { fontSize: 11, fontWeight: '700', color: ACCENT, letterSpacing: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  formatDivider: { width: 4, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)' },
+  uploadBottom: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingBottom: 18 },
+  uploadBottomText: { fontSize: 11, color: 'rgba(255,255,255,0.2)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+  featureRow: { flexDirection: 'row', paddingHorizontal: 24, marginTop: 14, gap: 10 },
+  featureCard: {
+    flex: 1, alignItems: 'center', gap: 8,
+    backgroundColor: CARD_BG, borderRadius: 16,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)', paddingVertical: 14,
+  },
+  featureIconWrap: { width: 34, height: 34, borderRadius: 10, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
+  featureLabel: { fontSize: 10, fontWeight: '600', color: 'rgba(255,255,255,0.4)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+
+  howCard: { marginHorizontal: 24, marginTop: 14, backgroundColor: CARD_BG, borderRadius: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)', padding: 18, gap: 14 },
+  howTitle: { fontSize: 11, fontWeight: '600', color: 'rgba(255,255,255,0.28)', letterSpacing: 1.2, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  howSteps: { gap: 12 },
+  howStep:  { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  howNum:   { width: 22, height: 22, borderRadius: 11, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
+  howNumText: { fontSize: 10, fontWeight: '700', color: ACCENT, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  howIconWrap: { width: 32, height: 32, borderRadius: 9, backgroundColor: 'rgba(255,255,255,0.04)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', alignItems: 'center', justifyContent: 'center' },
+  howText:  { fontSize: 13, color: 'rgba(255,255,255,0.55)', flex: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+  // File section
+  section:     { paddingHorizontal: 24, marginTop: 10, gap: 14 },
+  attachCard:  { backgroundColor: CARD_BG, borderRadius: 20, borderWidth: 1, borderColor: ACCENT_BORDER, padding: 16, gap: 14 },
+  fileRow:     { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  fileIconWrap:{ width: 46, height: 46, borderRadius: 13, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
+  fileMeta:    { flex: 1, gap: 3 },
+  fileName:    { fontSize: 14, fontWeight: '600', color: '#FFFFFF', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  fileSize:    { fontSize: 11, color: 'rgba(255,255,255,0.32)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  removeBtn:   { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.06)', alignItems: 'center', justifyContent: 'center' },
+  successBadge:{ width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(52,199,138,0.12)', alignItems: 'center', justifyContent: 'center' },
+  progressTrack: { height: 3, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.07)', overflow: 'hidden' },
+  progressFill:  { height: 3, borderRadius: 2 },
+  statusRow:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  statusText:  { fontSize: 12, color: 'rgba(255,255,255,0.45)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  errorRow:    { flexDirection: 'row', alignItems: 'flex-start', gap: 7 },
+  errorText:   { fontSize: 12, color: DANGER, flex: 1, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  actionRow:   { flexDirection: 'row', gap: 10 },
+  secondaryBtn:{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
+  secondaryBtnText: { fontSize: 13, fontWeight: '500', color: 'rgba(255,255,255,0.5)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  primaryBtn:  { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingVertical: 13, borderRadius: 12, backgroundColor: ACCENT },
+  primaryBtnText: { fontSize: 14, fontWeight: '600', color: '#FFFFFF', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+
+  // Done banner
+  doneBanner: {
+    backgroundColor: 'rgba(52,199,138,0.08)', borderRadius: 16,
+    borderWidth: 1, borderColor: 'rgba(52,199,138,0.2)',
+    padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+  },
+  doneBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  doneIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: 'rgba(52,199,138,0.12)', alignItems: 'center', justifyContent: 'center' },
+  doneBannerTitle: { fontSize: 14, fontWeight: '600', color: SUCCESS, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  doneBannerSub:   { fontSize: 11, color: 'rgba(52,199,138,0.6)', marginTop: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  doneStatRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  doneStat:    { fontSize: 11, color: 'rgba(52,199,138,0.7)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  doneStatDot: { width: 3, height: 3, borderRadius: 2, backgroundColor: 'rgba(52,199,138,0.4)' },
+
+  // Output grid
+  outputGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  outputCard: {
+    width: (SW - 48 - 10) / 2,
+    backgroundColor: CARD_BG, borderRadius: 18,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
+    padding: 16, gap: 6,
+  },
+  outputCardTop:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  outputIconWrap: { width: 40, height: 40, borderRadius: 12, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
+  outputCardLabel:{ fontSize: 15, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+  outputCardDesc: { fontSize: 11, color: 'rgba(255,255,255,0.35)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  outputCardCount:{ alignSelf: 'flex-start', marginTop: 4, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+  outputCardCountText: { fontSize: 10, fontWeight: '600', color: ACCENT, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+
+  // Content section
+  contentSection: { gap: 12 },
+  contentHeader:  { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  backBtn: { width: 34, height: 34, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
+  contentTitle: { fontSize: 16, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+
+  hintRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 },
+  hintText: { fontSize: 11, color: 'rgba(255,255,255,0.25)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+  summaryBox: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 18 },
+  summaryText: { fontSize: 14, color: 'rgba(255,255,255,0.78)', lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+  conceptsList: { gap: 10 },
+  conceptItem:  { flexDirection: 'row', gap: 12, backgroundColor: CARD_BG, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 14 },
+  conceptDot:   { width: 8, height: 8, borderRadius: 4, backgroundColor: ACCENT, marginTop: 5, flexShrink: 0 },
+  conceptContent: { flex: 1, gap: 4 },
+  conceptTerm:  { fontSize: 14, fontWeight: '600', color: '#FFFFFF', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  conceptDef:   { fontSize: 13, color: 'rgba(255,255,255,0.55)', lineHeight: 19, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+  flashList: { gap: 12 },
+  flashCard: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: ACCENT_BORDER, padding: 20, gap: 10, alignItems: 'center', minHeight: 140, justifyContent: 'center' },
+  flashCardFlipped: { backgroundColor: 'rgba(59,111,212,0.08)' },
+  flashCardHint: { fontSize: 10, fontWeight: '600', color: ACCENT, letterSpacing: 1, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  flashCardText: { fontSize: 15, color: '#FFFFFF', textAlign: 'center', lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  flashCardTap:  { fontSize: 11, color: 'rgba(255,255,255,0.2)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+  quizList: { gap: 14 },
+  quizCard: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 16, gap: 12 },
+  quizQuestion: { fontSize: 14, fontWeight: '600', color: '#FFFFFF', lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  quizOptions:  { gap: 8 },
+  quizOption:   { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 10, borderWidth: 1 },
+  quizOptionLetter: { fontSize: 12, fontWeight: '700', width: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 10, padding: 10 },
+  quizExplanationText: { fontSize: 12, color: 'rgba(255,255,255,0.45)', flex: 1, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+});
