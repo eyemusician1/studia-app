@@ -21,11 +21,11 @@ const SW            = Dimensions.get('window').width;
 
 type PickedFile     = { name: string; uri: string; size: number; mimeType: string };
 type UploadState    = 'idle' | 'uploading' | 'analyzing' | 'done' | 'error';
-type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz';
+type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz' | 'hardQuiz';
 type Concept        = { term: string; definition: string };
 type Flashcard      = { question: string; answer: string };
 type QuizItem       = { question: string; options: string[]; correctIndex: number; explanation: string };
-type AnalysisResult = { summary: string; keyConceptsList: Concept[]; flashcards: Flashcard[]; quiz: QuizItem[] };
+type AnalysisResult = { summary: string; keyConceptsList: Concept[]; flashcards: Flashcard[]; quiz: QuizItem[]; hardQuiz: QuizItem[] };
 
 function formatBytes(b: number) {
   if (b < 1024) return `${b} B`;
@@ -198,7 +198,13 @@ export default function HomeScreen() {
       if (fnError) throw new Error(`Analysis failed: ${fnError.message}`);
       if (!fnData?.success) throw new Error(fnData?.error ?? 'Analysis returned no data');
       animateProgress(1);
-      setResult({ summary: fnData.summary, keyConceptsList: fnData.keyConceptsList ?? [], flashcards: fnData.flashcards ?? [], quiz: fnData.quiz ?? [] });
+     setResult({ 
+  summary: fnData.summary, 
+  keyConceptsList: fnData.keyConceptsList ?? [], 
+  flashcards: fnData.flashcards ?? [], 
+  quiz: fnData.quiz ?? [],
+  hardQuiz: fnData.hardQuiz ?? [] 
+});
       setUploadState('done');
       setActiveView(null); // reset — user must pick a card
       showDoneBanner();
@@ -211,11 +217,12 @@ export default function HomeScreen() {
 
   const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
 
-  const OUTPUT_CARDS = [
+ const OUTPUT_CARDS = [
     { key: 'summary'   as ActiveView, icon: 'align-left',   label: 'Summary',    desc: 'Document overview',   count: null },
     { key: 'concepts'  as ActiveView, icon: 'tag',           label: 'Concepts',   desc: 'Key terms & ideas',   count: result?.keyConceptsList.length },
     { key: 'flashcards'as ActiveView, icon: 'layers',        label: 'Flashcards', desc: 'Q&A study cards',     count: result?.flashcards.length },
     { key: 'quiz'      as ActiveView, icon: 'check-square',  label: 'Quiz',       desc: 'Test your knowledge', count: result?.quiz.length },
+    { key: 'hardQuiz'  as ActiveView, icon: 'award',         label: 'Hard Quiz',  desc: '15 Challenge questions', count: result?.hardQuiz?.length },
   ];
 
   return (
@@ -436,7 +443,8 @@ export default function HomeScreen() {
                       {activeView === 'summary'    ? 'Summary'
                       : activeView === 'concepts'  ? `Key Concepts · ${result.keyConceptsList.length}`
                       : activeView === 'flashcards'? `Flashcards · ${result.flashcards.length}`
-                      :                              `Quiz · ${result.quiz.length}`}
+                      : activeView === 'quiz'      ? `Quiz · ${result.quiz.length}`
+                      :                              `Hard Quiz · ${result.hardQuiz.length}`}
                     </Text>
                   </View>
 
@@ -451,7 +459,7 @@ export default function HomeScreen() {
                   {activeView === 'concepts' && (
                     <View style={styles.conceptsList}>
                       {result.keyConceptsList.map((c, i) => (
-                        <View key={`concept-${i}`} style={styles.conceptItem}> {/* Fixed: unique key */}
+                        <View key={`concept-${i}`} style={styles.conceptItem}>
                           <View style={styles.conceptDot} />
                           <View style={styles.conceptContent}>
                             <Text style={styles.conceptTerm}>{c.term}</Text>
@@ -483,6 +491,16 @@ export default function HomeScreen() {
                       </View>
                       {/* Fixed: unique key */}
                       {result.quiz.map((q, i) => <QuizCard key={`quiz-${i}`} item={q} index={i} />)}
+                    </View>
+                  )}
+                  {/* Hard Quiz */}
+                  {activeView === 'hardQuiz' && (
+                    <View style={styles.quizList}>
+                      <View style={styles.hintRow}>
+                        <Feather name="award" size={11} color="rgba(255,255,255,0.25)" />
+                        <Text style={styles.hintText}>Challenge yourself!</Text>
+                      </View>
+                      {result.hardQuiz.map((q, i) => <QuizCard key={`hard-quiz-${i}`} item={q} index={i} />)}
                     </View>
                   )}
                 </View>

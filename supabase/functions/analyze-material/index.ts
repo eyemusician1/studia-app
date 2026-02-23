@@ -19,10 +19,18 @@ const PROMPT = `You are Studia, an AI study assistant. Analyze the provided stud
   ],
   "quiz": [
     {
-      "question": "Multiple choice question",
+      "question": "Standard multiple choice question",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correctIndex": 0,
       "explanation": "Why this answer is correct"
+    }
+  ],
+  "hardQuiz": [
+    {
+      "question": "A challenging, analytical, or scenario-based multiple choice question",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correctIndex": 0,
+      "explanation": "Detailed explanation of why this is correct"
     }
   ]
 }
@@ -30,7 +38,8 @@ const PROMPT = `You are Studia, an AI study assistant. Analyze the provided stud
 Rules:
 - Generate at least 5 key concepts
 - Generate at least 8 flashcards
-- Generate at least 5 quiz questions
+- Generate at least 5 regular quiz questions
+- Generate exactly 15 hardQuiz questions (focus on critical thinking and advanced concepts)
 - Be concise and student-friendly
 - Return ONLY valid JSON, no markdown, no extra text`;
 
@@ -263,6 +272,7 @@ serve(async (req) => {
       user_id: userId, file_name: fileName, storage_path: storagePath,
       summary: analysisResult.summary, key_concepts: analysisResult.keyConceptsList,
       flashcards: analysisResult.flashcards, quiz: analysisResult.quiz,
+      hard_quiz: analysisResult.hardQuiz, // Added this line
     });
     if (dbError) console.error('DB error:', dbError.message);
 
@@ -273,6 +283,7 @@ serve(async (req) => {
         keyConceptsList: analysisResult.keyConceptsList,
         flashcards: analysisResult.flashcards,
         quiz: analysisResult.quiz,
+        hardQuiz: analysisResult.hardQuiz, // Added this line
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
