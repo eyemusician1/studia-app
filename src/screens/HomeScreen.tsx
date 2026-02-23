@@ -17,7 +17,7 @@ const ACCENT_BORDER = 'rgba(59,111,212,0.22)';
 const SUCCESS       = '#34C78A';
 const DANGER        = '#FF5252';
 const CARD_BG       = 'rgba(255,255,255,0.035)';
-const { width: SW } = Dimensions.get('window');
+const SW            = Dimensions.get('window').width;
 
 type PickedFile     = { name: string; uri: string; size: number; mimeType: string };
 type UploadState    = 'idle' | 'uploading' | 'analyzing' | 'done' | 'error';
@@ -65,7 +65,7 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
             else if (isSelected) { bg = 'rgba(255,82,82,0.10)';  border = DANGER;  color = DANGER;  }
           }
           return (
-            <TouchableOpacity key={i}
+            <TouchableOpacity key={`opt-${i}`} // Fixed: unique key for option
               style={[styles.quizOption, { backgroundColor: bg, borderColor: border }]}
               onPress={() => { if (selected === null) setSelected(i); }}
               activeOpacity={0.8} disabled={selected !== null}
@@ -91,7 +91,9 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
 // ── Main Screen ───────────────────────────────────────────────────────────────
 export default function HomeScreen() {
   const { profile, user } = useAuth();
-  const initials  = profile ? `${profile.first_name[0]}${profile.last_name[0]}`.toUpperCase() : '?';
+  const first    = (profile?.first_name ?? '').charAt(0) || '?';
+  const last     = (profile?.last_name  ?? '').charAt(0) || '';
+  const initials = (first + last).toUpperCase();
 
   const [pickedFile,  setPickedFile]  = useState<PickedFile | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>('idle');
@@ -151,15 +153,38 @@ export default function HomeScreen() {
     try {
       setUploadState('uploading');
       animateProgress(0.15);
-      const ext = pickedFile.name.split('.').pop();
-      const storagePath = `${user.id}/${Date.now()}.${ext}`;
-      const base64 = await FileSystem.readAsStringAsync(pickedFile.uri, { encoding: FileSystem.EncodingType.Base64 });
+      const nameParts = pickedFile.name.split('.');
+      const ext = nameParts.length > 1 && nameParts[nameParts.length - 1].length > 0
+        ? nameParts[nameParts.length - 1]
+        : null;
+      const storagePath = ext
+        ? `${user.id}/${Date.now()}.${ext}`
+        : `${user.id}/${Date.now()}`;
       animateProgress(0.35);
-      const byteCharacters = atob(base64);
-      const byteArray = new Uint8Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) byteArray[i] = byteCharacters.charCodeAt(i);
+      // Read as base64 via expo-file-system (reliable on Android & iOS)
+      const base64 = await FileSystem.readAsStringAsync(pickedFile.uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      // Fast chunked decode — avoids call stack overflow on large files
+      const binaryStr = base64.replace(/[^A-Za-z0-9+/=]/g, '');
+      const byteCount = Math.floor(binaryStr.length * 3 / 4);
+      const byteArray = new Uint8Array(byteCount);
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+      const lut: number[] = new Array(256).fill(-1);
+      for (let i = 0; i < chars.length; i++) lut[chars.charCodeAt(i)] = i;
+      let out = 0;
+      for (let i = 0; i < binaryStr.length - 3; i += 4) {
+        const c0 = lut[binaryStr.charCodeAt(i)]   ?? 0;
+        const c1 = lut[binaryStr.charCodeAt(i+1)] ?? 0;
+        const c2 = lut[binaryStr.charCodeAt(i+2)] ?? 0;
+        const c3 = lut[binaryStr.charCodeAt(i+3)] ?? 0;
+        byteArray[out++] = (c0 << 2) | (c1 >> 4);
+        if (binaryStr[i+2] !== '=') byteArray[out++] = ((c1 & 0xf) << 4) | (c2 >> 2);
+        if (binaryStr[i+3] !== '=') byteArray[out++] = ((c2 & 0x3) << 6) | c3;
+      }
+      const uploadBytes = byteArray.slice(0, out);
       const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('study-materials').upload(storagePath, byteArray, { contentType: pickedFile.mimeType, upsert: false });
+        .from('study-materials').upload(storagePath, uploadBytes, { contentType: pickedFile.mimeType, upsert: false });
       if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
       animateProgress(0.55);
       setUploadState('analyzing');
@@ -205,8 +230,7 @@ export default function HomeScreen() {
           {/* ── Header ── */}
           <View style={styles.header}>
             <View style={styles.headerLeft}>
-              <Text style={styles.appName}>studia</Text>
-              <View style={styles.onlineDot} />
+              <Text style={styles.appName}>Studia</Text>
             </View>
             <View style={styles.avatar}>
               <Text style={styles.avatarText}>{initials}</Text>
@@ -263,7 +287,7 @@ export default function HomeScreen() {
                     { num: '2', icon: 'cpu',       text: 'AI analyzes your material' },
                     { num: '3', icon: 'book-open', text: 'Pick a format and study' },
                   ].map((step, i) => (
-                    <View key={i} style={styles.howStep}>
+                    <View key={`step-${i}`} style={styles.howStep}>
                       <View style={styles.howNum}><Text style={styles.howNumText}>{step.num}</Text></View>
                       <View style={styles.howIconWrap}><Feather name={step.icon as any} size={14} color={ACCENT} /></View>
                       <Text style={styles.howText}>{step.text}</Text>
@@ -427,7 +451,7 @@ export default function HomeScreen() {
                   {activeView === 'concepts' && (
                     <View style={styles.conceptsList}>
                       {result.keyConceptsList.map((c, i) => (
-                        <View key={i} style={styles.conceptItem}>
+                        <View key={`concept-${i}`} style={styles.conceptItem}> {/* Fixed: unique key */}
                           <View style={styles.conceptDot} />
                           <View style={styles.conceptContent}>
                             <Text style={styles.conceptTerm}>{c.term}</Text>
@@ -445,7 +469,8 @@ export default function HomeScreen() {
                         <Feather name="rotate-cw" size={11} color="rgba(255,255,255,0.25)" />
                         <Text style={styles.hintText}>Tap a card to flip</Text>
                       </View>
-                      {result.flashcards.map((fc, i) => <FlashCard key={i} card={fc} />)}
+                      {/* Fixed: unique key */}
+                      {result.flashcards.map((fc, i) => <FlashCard key={`flashcard-${i}`} card={fc} />)}
                     </View>
                   )}
 
@@ -456,7 +481,8 @@ export default function HomeScreen() {
                         <Feather name="target" size={11} color="rgba(255,255,255,0.25)" />
                         <Text style={styles.hintText}>Tap an option to answer</Text>
                       </View>
-                      {result.quiz.map((q, i) => <QuizCard key={i} item={q} index={i} />)}
+                      {/* Fixed: unique key */}
+                      {result.quiz.map((q, i) => <QuizCard key={`quiz-${i}`} item={q} index={i} />)}
                     </View>
                   )}
                 </View>
