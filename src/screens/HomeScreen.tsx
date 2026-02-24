@@ -10,6 +10,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const ACCENT        = '#3B6FD4';
 const ACCENT_DIM    = 'rgba(59,111,212,0.10)';
@@ -198,19 +199,54 @@ export default function HomeScreen() {
       if (fnError) throw new Error(`Analysis failed: ${fnError.message}`);
       if (!fnData?.success) throw new Error(fnData?.error ?? 'Analysis returned no data');
       animateProgress(1);
-     setResult({ 
-  summary: fnData.summary, 
-  keyConceptsList: fnData.keyConceptsList ?? [], 
-  flashcards: fnData.flashcards ?? [], 
-  quiz: fnData.quiz ?? [],
-  hardQuiz: fnData.hardQuiz ?? [] 
-});
+
+      // 1. Package the AI data into a variable first
+      const generatedData = { 
+        summary: fnData.summary, 
+        keyConceptsList: fnData.keyConceptsList ?? [], 
+        flashcards: fnData.flashcards ?? [], 
+        quiz: fnData.quiz ?? [],
+        hardQuiz: fnData.hardQuiz ?? []   
+      };
+
+      // 2. Update your app's screen
+      setResult(generatedData);
+
+      // 3. Save a backup to the phone's offline storage
+      try {
+        const newLesson = {
+          id: Date.now().toString(),
+          fileName: pickedFile.name,
+          date: new Date().toLocaleDateString(),
+          content: generatedData
+        };
+        
+        const existingHistory = await AsyncStorage.getItem('@studia_history');
+        let historyArray = existingHistory ? JSON.parse(existingHistory) : [];
+        historyArray.unshift(newLesson); // Add new lesson to the top of the list
+        
+        await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
+        console.log("Successfully saved offline!");
+      } catch (storageError) {
+        console.error("Offline save failed:", storageError);
+      }
+
+      // 4. Finish the upload sequence
       setUploadState('done');
-      setActiveView(null); // reset — user must pick a card
+      setActiveView(null); 
       showDoneBanner();
+
     } catch (err: any) {
       setUploadState('error');
-      setErrorMsg(err?.message ?? 'Something went wrong.');
+      
+      // Friendly Error Message Logic
+      const errorMessage = err?.message?.toLowerCase() || '';
+      if (errorMessage.includes('429') || errorMessage.includes('limit') || errorMessage.includes('too many requests')) {
+        setErrorMsg("Wow, too many people are studying right now!  Please wait 60 seconds and tap Retry.");
+      } else {
+        setErrorMsg(err?.message ?? 'Something went wrong.');
+      }
+      
       animateProgress(0);
     }
   };
@@ -228,8 +264,6 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
-      <View style={[styles.blob, { top: -80, left: -60 }]} />
-      <View style={[styles.blob, { top: 280, right: -80, width: 260, height: 260 }]} />
 
       <SafeAreaView style={styles.safe}>
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
