@@ -1,8 +1,8 @@
 // src/screens/HomeScreen.tsx
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, StatusBar,
-  Platform, Animated, Easing, ActivityIndicator, ScrollView, Dimensions,
+  Platform, Animated, Easing, ActivityIndicator, ScrollView, Dimensions, Alert, Image
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
@@ -22,11 +22,11 @@ const SW            = Dimensions.get('window').width;
 
 type PickedFile     = { name: string; uri: string; size: number; mimeType: string };
 type UploadState    = 'idle' | 'uploading' | 'analyzing' | 'done' | 'error';
-type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz' | 'hardQuiz';
+type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz' | 'hardQuiz' | 'exam';
 type Concept        = { term: string; definition: string };
 type Flashcard      = { question: string; answer: string };
 type QuizItem       = { question: string; options: string[]; correctIndex: number; explanation: string };
-type AnalysisResult = { summary: string; keyConceptsList: Concept[]; flashcards: Flashcard[]; quiz: QuizItem[]; hardQuiz: QuizItem[] };
+type AnalysisResult = { summary: string; keyConceptsList: Concept[]; flashcards: Flashcard[]; quiz: QuizItem[]; hardQuiz: QuizItem[]; exam?: QuizItem[] };
 
 function formatBytes(b: number) {
   if (b < 1024) return `${b} B`;
@@ -34,15 +34,10 @@ function formatBytes(b: number) {
   return `${(b / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// ── Flashcard ─────────────────────────────────────────────────────────────────
 function FlashCard({ card }: { card: Flashcard }) {
   const [flipped, setFlipped] = useState(false);
   return (
-    <TouchableOpacity
-      style={[styles.flashCard, flipped && styles.flashCardFlipped]}
-      onPress={() => setFlipped(!flipped)}
-      activeOpacity={0.85}
-    >
+    <TouchableOpacity style={[styles.flashCard, flipped && styles.flashCardFlipped]} onPress={() => setFlipped(!flipped)} activeOpacity={0.85}>
       <Text style={styles.flashCardHint}>{flipped ? 'Answer' : 'Question'}</Text>
       <Text style={styles.flashCardText}>{flipped ? card.answer : card.question}</Text>
       <Text style={styles.flashCardTap}>Tap to {flipped ? 'see question' : 'reveal answer'}</Text>
@@ -50,7 +45,6 @@ function FlashCard({ card }: { card: Flashcard }) {
   );
 }
 
-// ── Quiz card ─────────────────────────────────────────────────────────────────
 function QuizCard({ item, index }: { item: QuizItem; index: number }) {
   const [selected, setSelected] = useState<number | null>(null);
   return (
@@ -66,11 +60,7 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
             else if (isSelected) { bg = 'rgba(255,82,82,0.10)';  border = DANGER;  color = DANGER;  }
           }
           return (
-            <TouchableOpacity key={`opt-${i}`} // Fixed: unique key for option
-              style={[styles.quizOption, { backgroundColor: bg, borderColor: border }]}
-              onPress={() => { if (selected === null) setSelected(i); }}
-              activeOpacity={0.8} disabled={selected !== null}
-            >
+            <TouchableOpacity key={`opt-${i}`} style={[styles.quizOption, { backgroundColor: bg, borderColor: border }]} onPress={() => { if (selected === null) setSelected(i); }} activeOpacity={0.8} disabled={selected !== null}>
               <Text style={[styles.quizOptionLetter, { color }]}>{String.fromCharCode(65 + i)}</Text>
               <Text style={[styles.quizOptionText, { color }]}>{opt}</Text>
               {selected !== null && isCorrect    && <Feather name="check-circle" size={14} color={SUCCESS} />}
@@ -89,7 +79,6 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
   );
 }
 
-// ── Main Screen ───────────────────────────────────────────────────────────────
 export default function HomeScreen() {
   const { profile, user } = useAuth();
   const first    = (profile?.first_name ?? '').charAt(0) || '?';
@@ -102,9 +91,27 @@ export default function HomeScreen() {
   const [result,      setResult]      = useState<AnalysisResult | null>(null);
   const [activeView,  setActiveView]  = useState<ActiveView>(null);
 
+  // Exam Generation Mechanics
+  const [uploadedFilePath, setUploadedFilePath] = useState<string | null>(null);
+  const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
+  const [examQuotaUsed, setExamQuotaUsed]       = useState(0);
+  const [isGeneratingExam, setIsGeneratingExam] = useState(false);
+
   const cardScale    = useRef(new Animated.Value(1)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
   const doneAnim     = useRef(new Animated.Value(0)).current;
+
+  // The isWorking check helps us disable buttons when AI is thinking
+  const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
+
+  useEffect(() => {
+    const loadQuota = async () => {
+      if (!user) return;
+      const quota = await AsyncStorage.getItem(`@studia_exam_quota_${user.id}`);
+      if (quota) setExamQuotaUsed(parseInt(quota));
+    };
+    loadQuota();
+  }, [user]);
 
   const bumpScale = () => {
     Animated.sequence([
@@ -113,60 +120,45 @@ export default function HomeScreen() {
     ]).start();
   };
 
-  const animateProgress = (to: number) =>
-    Animated.timing(progressAnim, { toValue: to, duration: 400, easing: Easing.out(Easing.cubic), useNativeDriver: false }).start();
-
-  const showDoneBanner = () => {
-    doneAnim.setValue(0);
-    Animated.spring(doneAnim, { toValue: 1, tension: 120, friction: 10, useNativeDriver: true }).start();
-  };
+  const animateProgress = (to: number) => Animated.timing(progressAnim, { toValue: to, duration: 400, easing: Easing.out(Easing.cubic), useNativeDriver: false }).start();
+  const showDoneBanner = () => { doneAnim.setValue(0); Animated.spring(doneAnim, { toValue: 1, tension: 120, friction: 10, useNativeDriver: true }).start(); };
 
   const handlePick = async () => {
     bumpScale();
-    const res = await DocumentPicker.getDocumentAsync({
-      type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-      copyToCacheDirectory: true,
-    });
+    const res = await DocumentPicker.getDocumentAsync({ type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'], copyToCacheDirectory: true });
     if (!res.canceled) {
       const asset = res.assets[0];
+
+      // --- NEW SIZE LIMIT CHECK ---
+      if (asset.size && asset.size > 5 * 1024 * 1024) {
+        Alert.alert(
+          "File Too Large", 
+          "Please upload a document smaller than 5MB."
+        );
+        return; // Stops the upload completely
+      }
+      // ----------------------------
+
       setPickedFile({ name: asset.name, uri: asset.uri, size: asset.size ?? 0, mimeType: asset.mimeType ?? 'application/octet-stream' });
-      setUploadState('idle');
-      setResult(null);
-      setActiveView(null);
-      setErrorMsg('');
-      progressAnim.setValue(0);
-      doneAnim.setValue(0);
+      setUploadState('idle'); setResult(null); setActiveView(null); setErrorMsg(''); setUploadedFilePath(null); setCurrentHistoryId(null);
+      progressAnim.setValue(0); doneAnim.setValue(0);
     }
   };
 
-  const handleRemove = () => {
-    setPickedFile(null);
-    setUploadState('idle');
-    setResult(null);
-    setActiveView(null);
-    setErrorMsg('');
-    progressAnim.setValue(0);
-    doneAnim.setValue(0);
-  };
+  const handleRemove = () => { setPickedFile(null); setUploadState('idle'); setResult(null); setActiveView(null); setErrorMsg(''); setUploadedFilePath(null); setCurrentHistoryId(null); progressAnim.setValue(0); doneAnim.setValue(0); };
 
   const handleAnalyze = async () => {
     if (!pickedFile || !user) return;
     try {
-      setUploadState('uploading');
-      animateProgress(0.15);
+      setUploadState('uploading'); animateProgress(0.15);
       const nameParts = pickedFile.name.split('.');
-      const ext = nameParts.length > 1 && nameParts[nameParts.length - 1].length > 0
-        ? nameParts[nameParts.length - 1]
-        : null;
-      const storagePath = ext
-        ? `${user.id}/${Date.now()}.${ext}`
-        : `${user.id}/${Date.now()}`;
+      const ext = nameParts.length > 1 ? nameParts[nameParts.length - 1] : null;
+      const storagePath = ext ? `${user.id}/${Date.now()}.${ext}` : `${user.id}/${Date.now()}`;
+      
+      setUploadedFilePath(storagePath); 
+
       animateProgress(0.35);
-      // Read as base64 via expo-file-system (reliable on Android & iOS)
-      const base64 = await FileSystem.readAsStringAsync(pickedFile.uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      // Fast chunked decode — avoids call stack overflow on large files
+      const base64 = await FileSystem.readAsStringAsync(pickedFile.uri, { encoding: FileSystem.EncodingType.Base64 });
       const binaryStr = base64.replace(/[^A-Za-z0-9+/=]/g, '');
       const byteCount = Math.floor(binaryStr.length * 3 / 4);
       const byteArray = new Uint8Array(byteCount);
@@ -175,102 +167,155 @@ export default function HomeScreen() {
       for (let i = 0; i < chars.length; i++) lut[chars.charCodeAt(i)] = i;
       let out = 0;
       for (let i = 0; i < binaryStr.length - 3; i += 4) {
-        const c0 = lut[binaryStr.charCodeAt(i)]   ?? 0;
-        const c1 = lut[binaryStr.charCodeAt(i+1)] ?? 0;
-        const c2 = lut[binaryStr.charCodeAt(i+2)] ?? 0;
-        const c3 = lut[binaryStr.charCodeAt(i+3)] ?? 0;
+        const c0 = lut[binaryStr.charCodeAt(i)] ?? 0; const c1 = lut[binaryStr.charCodeAt(i+1)] ?? 0; const c2 = lut[binaryStr.charCodeAt(i+2)] ?? 0; const c3 = lut[binaryStr.charCodeAt(i+3)] ?? 0;
         byteArray[out++] = (c0 << 2) | (c1 >> 4);
         if (binaryStr[i+2] !== '=') byteArray[out++] = ((c1 & 0xf) << 4) | (c2 >> 2);
         if (binaryStr[i+3] !== '=') byteArray[out++] = ((c2 & 0x3) << 6) | c3;
       }
       const uploadBytes = byteArray.slice(0, out);
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('study-materials').upload(storagePath, uploadBytes, { contentType: pickedFile.mimeType, upsert: false });
+      const { data: uploadData, error: uploadError } = await supabase.storage.from('study-materials').upload(storagePath, uploadBytes, { contentType: pickedFile.mimeType, upsert: false });
       if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
-      animateProgress(0.55);
-      setUploadState('analyzing');
-      animateProgress(0.75);
+      
+      animateProgress(0.55); setUploadState('analyzing'); animateProgress(0.75);
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('No active session.');
       const { data: fnData, error: fnError } = await supabase.functions.invoke('analyze-material', {
-        body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id },
-        headers: { Authorization: `Bearer ${session.access_token}` },
+        body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id }, headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (fnError) throw new Error(`Analysis failed: ${fnError.message}`);
       if (!fnData?.success) throw new Error(fnData?.error ?? 'Analysis returned no data');
       animateProgress(1);
 
-      // 1. Package the AI data into a variable first
-      const generatedData = { 
-        summary: fnData.summary, 
-        keyConceptsList: fnData.keyConceptsList ?? [], 
-        flashcards: fnData.flashcards ?? [], 
-        quiz: fnData.quiz ?? [],
-        hardQuiz: fnData.hardQuiz ?? []   
-      };
-
-      // 2. Update your app's screen
+      const generatedData = { summary: fnData.summary, keyConceptsList: fnData.keyConceptsList ?? [], flashcards: fnData.flashcards ?? [], quiz: fnData.quiz ?? [], hardQuiz: fnData.hardQuiz ?? [] };
       setResult(generatedData);
 
-      // 3. Save a backup to the phone's offline storage
       try {
-        const newLesson = {
-          id: Date.now().toString(),
-          fileName: pickedFile.name,
-          date: new Date().toLocaleDateString(),
-          content: generatedData
-        };
-        
+        const historyId = Date.now().toString();
+        setCurrentHistoryId(historyId); 
+        const newLesson = { id: historyId, fileName: pickedFile.name, date: new Date().toLocaleDateString(), content: generatedData };
         const existingHistory = await AsyncStorage.getItem('@studia_history');
         let historyArray = existingHistory ? JSON.parse(existingHistory) : [];
-        historyArray.unshift(newLesson); // Add new lesson to the top of the list
-        
+        historyArray.unshift(newLesson);
         await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
-        console.log("Successfully saved offline!");
-      } catch (storageError) {
-        console.error("Offline save failed:", storageError);
-      }
+      } catch (e) { console.error(e); }
 
-      // 4. Finish the upload sequence
-      setUploadState('done');
-      setActiveView(null); 
-      showDoneBanner();
+      setUploadState('done'); setActiveView(null); showDoneBanner();
+      
+      // Friendly Success Alert
+      Alert.alert("Success!", "Your study materials are ready.");
 
     } catch (err: any) {
       setUploadState('error');
-      
-      // Friendly Error Message Logic
+      console.error("Upload error:", err);
       const errorMessage = err?.message?.toLowerCase() || '';
-      if (errorMessage.includes('429') || errorMessage.includes('limit') || errorMessage.includes('too many requests')) {
-        setErrorMsg("Wow, too many people are studying right now!  Please wait 60 seconds and tap Retry.");
-      } else {
-        setErrorMsg(err?.message ?? 'Something went wrong.');
-      }
       
+      // --- NEW FRIENDLY ERROR HANDLING ---
+      if (errorMessage.includes('json') || errorMessage.includes('546') || errorMessage.includes('timeout') || errorMessage.includes('429') || errorMessage.includes('limit')) {
+        Alert.alert(
+          "Server is Catching its Breath!", 
+          "A lot of students are studying right now, and our free AI server is quite busy. Please wait 10 seconds and try again!"
+        );
+        setErrorMsg("Server busy. Please wait 10 seconds and retry.");
+      } else if (errorMessage.includes('network') || errorMessage.includes('failed to fetch')) {
+        Alert.alert(
+          "No Internet Connection", 
+          "Please check your Wi-Fi or mobile data and try again."
+        );
+        setErrorMsg("No internet connection.");
+      } else {
+        Alert.alert(
+          "Analysis Failed", 
+          "We couldn't read this specific file. Please make sure it is a standard text-based PDF or DOCX."
+        );
+        setErrorMsg("Failed to read document.");
+      }
       animateProgress(0);
     }
   };
 
-  const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
+  const handleGenerateExam = async () => {
+    if (!uploadedFilePath || !currentHistoryId) {
+      Alert.alert("Error", "Missing file data. Please re-upload the document.");
+      return;
+    }
 
- const OUTPUT_CARDS = [
+    try {
+      setIsGeneratingExam(true);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error('No active session. Please log in again.');
+
+      const { data: fnData, error: fnError } = await supabase.functions.invoke('generate-exam', {
+        body: { storagePath: uploadedFilePath, fileName: pickedFile?.name, userId: user?.id },
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+
+      if (fnError) {
+        throw new Error(`Connection Failed. Have you deployed the 'generate-exam' edge function yet? Error: ${fnError.message}`);
+      }
+      if (!fnData?.success || !fnData?.exam) {
+        throw new Error(fnData?.error ?? 'Failed to generate 50 items. The AI might be busy.');
+      }
+
+      const newExam = fnData.exam;
+
+      setResult(prev => prev ? { ...prev, exam: newExam } : null);
+
+      const existingHistoryStr = await AsyncStorage.getItem('@studia_history');
+      if (existingHistoryStr) {
+        let historyArray = JSON.parse(existingHistoryStr);
+        const index = historyArray.findIndex((item: any) => item.id === currentHistoryId);
+        if (index !== -1) {
+          historyArray[index].content.exam = newExam;
+          await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
+        }
+      }
+
+      if (user) {
+        const newQuota = examQuotaUsed + 1;
+        setExamQuotaUsed(newQuota);
+        await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, newQuota.toString());
+      }
+
+      setActiveView('exam');
+    } catch (err: any) {
+      console.error(err);
+      Alert.alert("Generation Failed", err?.message || "Something went wrong.");
+    } finally {
+      setIsGeneratingExam(false);
+    }
+  };
+
+  const remainingExams = Math.max(0, 2 - examQuotaUsed);
+
+  const OUTPUT_CARDS = [
     { key: 'summary'   as ActiveView, icon: 'align-left',   label: 'Summary',    desc: 'Document overview',   count: null },
-    { key: 'concepts'  as ActiveView, icon: 'tag',           label: 'Concepts',   desc: 'Key terms & ideas',   count: result?.keyConceptsList.length },
-    { key: 'flashcards'as ActiveView, icon: 'layers',        label: 'Flashcards', desc: 'Q&A study cards',     count: result?.flashcards.length },
-    { key: 'quiz'      as ActiveView, icon: 'check-square',  label: 'Quiz',       desc: 'Test your knowledge', count: result?.quiz.length },
-    { key: 'hardQuiz'  as ActiveView, icon: 'award',         label: 'Hard Quiz',  desc: '15 Challenge questions', count: result?.hardQuiz?.length },
+    { key: 'concepts'  as ActiveView, icon: 'tag',          label: 'Concepts',   desc: 'Key terms & ideas',   count: result?.keyConceptsList.length },
+    { key: 'flashcards'as ActiveView, icon: 'layers',       label: 'Flashcards', desc: 'Q&A study cards',     count: result?.flashcards.length },
+    { key: 'quiz'      as ActiveView, icon: 'check-square', label: 'Quiz',       desc: 'Test your knowledge', count: result?.quiz.length },
+    { key: 'hardQuiz'  as ActiveView, icon: 'award',        label: 'Hard Quiz',  desc: '5 Challenge questions', count: result?.hardQuiz?.length },
+    { 
+      key: 'exam'      as ActiveView, 
+      icon: 'file-text',    
+      label: 'Final Exam', 
+      desc: result?.exam ? 'University Level' : `${remainingExams} remaining`, 
+      count: result?.exam?.length, 
+      isLocked: !result?.exam && examQuotaUsed >= 2 
+    },
   ];
 
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
-
       <SafeAreaView style={styles.safe}>
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
-          {/* ── Header ── */}
           <View style={styles.header}>
             <View style={styles.headerLeft}>
+              <Image 
+                source={require('../../assets/logo.png')} 
+                style={styles.logoImage} 
+                resizeMode="contain"
+              />
               <Text style={styles.appName}>Studia</Text>
             </View>
             <View style={styles.avatar}>
@@ -278,79 +323,61 @@ export default function HomeScreen() {
             </View>
           </View>
 
-          {/* ── IDLE: no file ── */}
+          {/* Centered Upload State */}
           {!pickedFile && (
-            <>
+            <View style={styles.idleContainer}>
               <Animated.View style={[styles.uploadCard, { transform: [{ scale: cardScale }] }]}>
-                <TouchableOpacity style={styles.uploadTouchable} onPress={handlePick} activeOpacity={1}>
+                <TouchableOpacity 
+                  style={[styles.uploadTouchable, isWorking && { opacity: 0.5 }]} 
+                  onPress={handlePick} 
+                  activeOpacity={1}
+                  disabled={isWorking}
+                >
                   <View style={styles.gridLines} pointerEvents="none">
                     {[0,1,2,3].map(i => <View key={`h${i}`} style={[styles.gridLine,  { top:  `${25*(i+1)}%` as any }]} />)}
                     {[0,1,2,3].map(i => <View key={`v${i}`} style={[styles.gridLineV, { left: `${25*(i+1)}%` as any }]} />)}
                   </View>
-                  <View style={styles.uploadCenter}>
-                    <View style={styles.uploadIconOuter}>
-                      <View style={styles.uploadIconInner}>
-                        <Feather name="upload-cloud" size={36} color={ACCENT} />
+                  
+                  {isWorking ? (
+                    <View style={styles.uploadCenter}>
+                      <ActivityIndicator size="large" color={ACCENT} />
+                      <Text style={styles.uploadTitle}>AI is reading your document...</Text>
+                      <Text style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12, textAlign: 'center', marginTop: 8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) }}>
+                        Please do not close the app.{"\n"}This usually takes 5-10 seconds.
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={styles.uploadCenter}>
+                      <View style={styles.uploadIconOuter}>
+                        <View style={styles.uploadIconInner}>
+                          <Feather name="upload-cloud" size={36} color={ACCENT} />
+                        </View>
                       </View>
+                      <Text style={styles.uploadTitle}>Drop your file here</Text>
+                      <View style={styles.formatRow}>
+                        <View style={styles.formatPill}><Text style={styles.formatText}>PDF</Text></View>
+                        <View style={styles.formatDivider} />
+                        <View style={styles.formatPill}><Text style={styles.formatText}>DOCX</Text></View>
+                      </View>
+                      <Text style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 }}>Max file size: 5MB</Text>
                     </View>
-                    <Text style={styles.uploadTitle}>Drop your file here</Text>
-                    <View style={styles.formatRow}>
-                      <View style={styles.formatPill}><Text style={styles.formatText}>PDF</Text></View>
-                      <View style={styles.formatDivider} />
-                      <View style={styles.formatPill}><Text style={styles.formatText}>DOCX</Text></View>
-                    </View>
-                  </View>
-                  <View style={styles.uploadBottom}>
-                    <Feather name="lock" size={11} color="rgba(255,255,255,0.2)" />
-                    <Text style={styles.uploadBottomText}>Files are processed securely</Text>
-                  </View>
+                  )}
                 </TouchableOpacity>
               </Animated.View>
 
-              {/* Feature strip */}
-              <View style={styles.featureRow}>
-                {OUTPUT_CARDS.map((c) => (
-                  <View key={c.key} style={styles.featureCard}>
-                    <View style={styles.featureIconWrap}>
-                      <Feather name={c.icon as any} size={15} color={ACCENT} />
-                    </View>
-                    <Text style={styles.featureLabel}>{c.label}</Text>
-                  </View>
-                ))}
-              </View>
-
-              {/* How it works */}
-              <View style={styles.howCard}>
-                <Text style={styles.howTitle}>How it works</Text>
-                <View style={styles.howSteps}>
-                  {[
-                    { num: '1', icon: 'upload',    text: 'Upload a PDF or DOCX' },
-                    { num: '2', icon: 'cpu',       text: 'AI analyzes your material' },
-                    { num: '3', icon: 'book-open', text: 'Pick a format and study' },
-                  ].map((step, i) => (
-                    <View key={`step-${i}`} style={styles.howStep}>
-                      <View style={styles.howNum}><Text style={styles.howNumText}>{step.num}</Text></View>
-                      <View style={styles.howIconWrap}><Feather name={step.icon as any} size={14} color={ACCENT} /></View>
-                      <Text style={styles.howText}>{step.text}</Text>
-                    </View>
-                  ))}
-                </View>
-              </View>
-            </>
+              <Text style={styles.idleSubtitle}>
+                Upload a document to instantly generate flashcards, quizzes, and exam.
+              </Text>
+            </View>
           )}
 
-          {/* ── File attached ── */}
           {pickedFile && (
             <View style={styles.section}>
-
-              {/* File card */}
               <View style={styles.attachCard}>
                 <View style={styles.fileRow}>
-                  <View style={styles.fileIconWrap}>
-                    <Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={20} color={ACCENT} />
-                  </View>
+                  <View style={styles.fileIconWrap}><Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={20} color={ACCENT} /></View>
                   <View style={styles.fileMeta}>
-                    <Text style={styles.fileName} numberOfLines={1} ellipsizeMode="middle">{pickedFile.name}</Text>
+                    <Text style={styles.fileName} numberOfLines={1}>{pickedFile.name}</Text>
                     <Text style={styles.fileSize}>{formatBytes(pickedFile.size)}</Text>
                   </View>
                   {!isWorking && uploadState !== 'done' && (
@@ -358,26 +385,19 @@ export default function HomeScreen() {
                       <Feather name="x" size={14} color="rgba(255,255,255,0.35)" />
                     </TouchableOpacity>
                   )}
-                  {uploadState === 'done' && (
-                    <View style={styles.successBadge}><Feather name="check" size={13} color={SUCCESS} /></View>
-                  )}
+                  {uploadState === 'done' && <View style={styles.successBadge}><Feather name="check" size={13} color={SUCCESS} /></View>}
                 </View>
 
                 {(isWorking || uploadState === 'done') && (
                   <View style={styles.progressTrack}>
-                    <Animated.View style={[styles.progressFill, {
-                      backgroundColor: uploadState === 'done' ? SUCCESS : ACCENT,
-                      width: progressAnim.interpolate({ inputRange: [0,1], outputRange: ['0%','100%'] }),
-                    }]} />
+                    <Animated.View style={[styles.progressFill, { backgroundColor: uploadState === 'done' ? SUCCESS : ACCENT, width: progressAnim.interpolate({ inputRange: [0,1], outputRange: ['0%','100%'] }) }]} />
                   </View>
                 )}
 
                 {isWorking && (
                   <View style={styles.statusRow}>
                     <ActivityIndicator size="small" color={ACCENT} />
-                    <Text style={styles.statusText}>
-                      {uploadState === 'uploading' ? 'Uploading...' : 'AI is reading your document...'}
-                    </Text>
+                    <Text style={styles.statusText}>{uploadState === 'uploading' ? 'Uploading...' : 'AI is reading your document...'}</Text>
                   </View>
                 )}
 
@@ -402,10 +422,7 @@ export default function HomeScreen() {
                         <Text style={styles.primaryBtnText}>New upload</Text>
                       </TouchableOpacity>
                     ) : (
-                      <TouchableOpacity
-                        style={[styles.primaryBtn, uploadState === 'error' && { backgroundColor: '#C0392B' }]}
-                        onPress={handleAnalyze}
-                      >
+                      <TouchableOpacity style={[styles.primaryBtn, uploadState === 'error' && { backgroundColor: '#C0392B' }]} onPress={handleAnalyze}>
                         <Feather name={uploadState === 'error' ? 'rotate-cw' : 'zap'} size={15} color="#fff" />
                         <Text style={styles.primaryBtnText}>{uploadState === 'error' ? 'Retry' : 'Analyze'}</Text>
                       </TouchableOpacity>
@@ -414,61 +431,55 @@ export default function HomeScreen() {
                 )}
               </View>
 
-              {/* ── Done banner ── */}
-              {result && uploadState === 'done' && (
-                <Animated.View style={[styles.doneBanner, {
-                  opacity: doneAnim,
-                  transform: [{ translateY: doneAnim.interpolate({ inputRange:[0,1], outputRange:[12,0] }) }],
-                }]}>
-                  <View style={styles.doneBannerLeft}>
-                    <View style={styles.doneIconWrap}>
-                      <Feather name="check-circle" size={18} color={SUCCESS} />
-                    </View>
-                    <View>
-                      <Text style={styles.doneBannerTitle}>Analysis complete</Text>
-                      <Text style={styles.doneBannerSub}>Select a format below to study</Text>
-                    </View>
-                  </View>
-                  <View style={styles.doneStatRow}>
-                    <Text style={styles.doneStat}>{result.flashcards.length} cards</Text>
-                    <View style={styles.doneStatDot} />
-                    <Text style={styles.doneStat}>{result.quiz.length} quiz</Text>
-                  </View>
-                </Animated.View>
-              )}
-
-              {/* ── Output selection cards ── */}
-              {result && uploadState === 'done' && activeView === null && (
+              {result && uploadState === 'done' && activeView === null && !isGeneratingExam && (
                 <View style={styles.outputGrid}>
-                  {OUTPUT_CARDS.map((card) => (
-                    <TouchableOpacity
-                      key={card.key}
-                      style={styles.outputCard}
-                      onPress={() => setActiveView(card.key)}
-                      activeOpacity={0.8}
-                    >
-                      <View style={styles.outputCardTop}>
-                        <View style={styles.outputIconWrap}>
-                          <Feather name={card.icon as any} size={20} color={ACCENT} />
+                  {OUTPUT_CARDS.map((card) => {
+                    const isLocked = card.isLocked;
+                    return (
+                      <TouchableOpacity
+                        key={card.key}
+                        style={[styles.outputCard, isLocked && styles.outputCardLocked]}
+                        onPress={() => {
+                          if (card.key === 'exam' && !result?.exam) {
+                            if (isLocked) Alert.alert("Limit Reached", "You have already used your 2 exam generations to prevent AI exhaustion.");
+                            else handleGenerateExam();
+                          } else {
+                            setActiveView(card.key);
+                          }
+                        }}
+                        activeOpacity={isLocked ? 1 : 0.8}
+                      >
+                        <View style={styles.outputCardTop}>
+                          <View style={[styles.outputIconWrap, isLocked && styles.outputIconWrapLocked]}>
+                            <Feather name={isLocked ? "lock" : card.icon as any} size={20} color={isLocked ? "rgba(255,255,255,0.4)" : ACCENT} />
+                          </View>
+                          {!isLocked && <Feather name="arrow-right" size={14} color="rgba(255,255,255,0.2)" />}
                         </View>
-                        <Feather name="arrow-right" size={14} color="rgba(255,255,255,0.2)" />
-                      </View>
-                      <Text style={styles.outputCardLabel}>{card.label}</Text>
-                      <Text style={styles.outputCardDesc}>{card.desc}</Text>
-                      {card.count != null && (
-                        <View style={styles.outputCardCount}>
-                          <Text style={styles.outputCardCountText}>{card.count} items</Text>
-                        </View>
-                      )}
-                    </TouchableOpacity>
-                  ))}
+                        <Text style={[styles.outputCardLabel, isLocked && styles.outputCardLabelLocked]}>{card.label}</Text>
+                        <Text style={styles.outputCardDesc}>{card.desc}</Text>
+                        {card.count != null && (
+                          <View style={styles.outputCardCount}>
+                            <Text style={styles.outputCardCountText}>{card.count} items</Text>
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
                 </View>
               )}
 
-              {/* ── Active content view ── */}
+              {/* ── Generating Exam Overlay ── */}
+              {isGeneratingExam && (
+                <View style={styles.generatingOverlay}>
+                  <ActivityIndicator size="large" color="#9B51E0" />
+                  <Text style={styles.generatingText}>Drafting 50-Item Exam...</Text>
+                  <Text style={styles.generatingSubText}>This may take up to 60 seconds.</Text>
+                </View>
+              )}
+
+              {/* ── Active Content View ── */}
               {result && activeView !== null && (
                 <View style={styles.contentSection}>
-                  {/* Back + title bar */}
                   <View style={styles.contentHeader}>
                     <TouchableOpacity style={styles.backBtn} onPress={() => setActiveView(null)}>
                       <Feather name="arrow-left" size={15} color="rgba(255,255,255,0.6)" />
@@ -478,63 +489,44 @@ export default function HomeScreen() {
                       : activeView === 'concepts'  ? `Key Concepts · ${result.keyConceptsList.length}`
                       : activeView === 'flashcards'? `Flashcards · ${result.flashcards.length}`
                       : activeView === 'quiz'      ? `Quiz · ${result.quiz.length}`
+                      : activeView === 'exam'      ? `Final Exam · ${result.exam?.length}`
                       :                              `Hard Quiz · ${result.hardQuiz.length}`}
                     </Text>
                   </View>
 
-                  {/* Summary */}
                   {activeView === 'summary' && (
-                    <View style={styles.summaryBox}>
-                      <Text style={styles.summaryText}>{result.summary}</Text>
-                    </View>
+                    <View style={styles.summaryBox}><Text style={styles.summaryText}>{result.summary}</Text></View>
                   )}
-
-                  {/* Concepts */}
                   {activeView === 'concepts' && (
                     <View style={styles.conceptsList}>
                       {result.keyConceptsList.map((c, i) => (
                         <View key={`concept-${i}`} style={styles.conceptItem}>
-                          <View style={styles.conceptDot} />
-                          <View style={styles.conceptContent}>
-                            <Text style={styles.conceptTerm}>{c.term}</Text>
-                            <Text style={styles.conceptDef}>{c.definition}</Text>
-                          </View>
+                          <View style={styles.conceptDot} /><View style={styles.conceptContent}><Text style={styles.conceptTerm}>{c.term}</Text><Text style={styles.conceptDef}>{c.definition}</Text></View>
                         </View>
                       ))}
                     </View>
                   )}
-
-                  {/* Flashcards */}
                   {activeView === 'flashcards' && (
                     <View style={styles.flashList}>
-                      <View style={styles.hintRow}>
-                        <Feather name="rotate-cw" size={11} color="rgba(255,255,255,0.25)" />
-                        <Text style={styles.hintText}>Tap a card to flip</Text>
-                      </View>
-                      {/* Fixed: unique key */}
+                      <View style={styles.hintRow}><Feather name="rotate-cw" size={11} color="rgba(255,255,255,0.25)" /><Text style={styles.hintText}>Tap a card to flip</Text></View>
                       {result.flashcards.map((fc, i) => <FlashCard key={`flashcard-${i}`} card={fc} />)}
                     </View>
                   )}
-
-                  {/* Quiz */}
                   {activeView === 'quiz' && (
                     <View style={styles.quizList}>
-                      <View style={styles.hintRow}>
-                        <Feather name="target" size={11} color="rgba(255,255,255,0.25)" />
-                        <Text style={styles.hintText}>Tap an option to answer</Text>
-                      </View>
-                      {/* Fixed: unique key */}
+                      <View style={styles.hintRow}><Feather name="target" size={11} color="rgba(255,255,255,0.25)" /><Text style={styles.hintText}>Tap an option to answer</Text></View>
                       {result.quiz.map((q, i) => <QuizCard key={`quiz-${i}`} item={q} index={i} />)}
                     </View>
                   )}
-                  {/* Hard Quiz */}
                   {activeView === 'hardQuiz' && (
                     <View style={styles.quizList}>
-                      <View style={styles.hintRow}>
-                        <Feather name="award" size={11} color="rgba(255,255,255,0.25)" />
-                        <Text style={styles.hintText}>Challenge yourself!</Text>
-                      </View>
                       {result.hardQuiz.map((q, i) => <QuizCard key={`hard-quiz-${i}`} item={q} index={i} />)}
+                    </View>
+                  )}
+                  {activeView === 'exam' && (
+                    <View style={styles.quizList}>
+                      <View style={styles.hintRow}><Feather name="award" size={11} color="rgba(255,255,255,0.25)" /><Text style={styles.hintText}>University Level Examination</Text></View>
+                      {result.exam?.map((q, i) => <QuizCard key={`exam-q-${i}`} item={q} index={i} />)}
                     </View>
                   )}
                 </View>
@@ -549,86 +541,36 @@ export default function HomeScreen() {
   );
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0C0D12' },
-  blob: { position: 'absolute', width: 340, height: 340, borderRadius: 170, backgroundColor: 'rgba(59,111,212,0.06)' },
   safe:   { flex: 1 },
   scroll: { flexGrow: 1, paddingBottom: 56 },
 
-  header: {
-    paddingHorizontal: 24, paddingTop: 14, paddingBottom: 6,
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-  },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  appName: {
-    fontSize: 20, fontWeight: '800', color: '#FFFFFF', letterSpacing: -0.8,
-    fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }),
-  },
-  onlineDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: SUCCESS, marginBottom: 8 },
-  avatar: {
-    width: 38, height: 38, borderRadius: 19,
-    backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  avatarText: {
-    fontSize: 13, fontWeight: '700', color: ACCENT, letterSpacing: 0.5,
-    fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }),
-  },
+  header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 6, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 }, 
+  logoImage: { width: 32, height: 32, borderRadius: 8 }, 
+  appName: { fontSize: 20, fontWeight: '800', color: '#FFFFFF', letterSpacing: -0.8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+  appSubtitle: { fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  avatar: { width: 38, height: 38, borderRadius: 19, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
+  avatarText: { fontSize: 13, fontWeight: '700', color: ACCENT, letterSpacing: 0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  // Upload card
-  uploadCard: {
-    marginHorizontal: 24, marginTop: 10,
-    height: SW * 0.72, borderRadius: 24,
-    backgroundColor: 'rgba(59,111,212,0.05)',
-    borderWidth: 1.5, borderColor: ACCENT_BORDER,
-    borderStyle: 'dashed', overflow: 'hidden',
-  },
+  idleContainer: { flex: 1, justifyContent: 'center', paddingBottom: 40 },
+  idleSubtitle: { textAlign: 'center', color: 'rgba(255,255,255,0.4)', fontSize: 13, marginTop: 24, paddingHorizontal: 40, lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+  uploadCard: { marginHorizontal: 24, height: SW * 0.72, borderRadius: 24, backgroundColor: 'rgba(59,111,212,0.05)', borderWidth: 1.5, borderColor: ACCENT_BORDER, borderStyle: 'dashed', overflow: 'hidden' },
   uploadTouchable: { flex: 1 },
   gridLines:  { ...StyleSheet.absoluteFillObject },
   gridLine:   { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: 'rgba(59,111,212,0.07)' },
   gridLineV:  { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: 'rgba(59,111,212,0.07)' },
   uploadCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
-  uploadIconOuter: {
-    width: 100, height: 100, borderRadius: 50,
-    backgroundColor: 'rgba(59,111,212,0.08)', borderWidth: 1, borderColor: 'rgba(59,111,212,0.15)',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  uploadIconInner: {
-    width: 72, height: 72, borderRadius: 36,
-    backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  uploadTitle: {
-    fontSize: 18, fontWeight: '600', color: 'rgba(255,255,255,0.75)', letterSpacing: -0.3,
-    fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }),
-  },
+  uploadIconOuter: { width: 100, height: 100, borderRadius: 50, backgroundColor: 'rgba(59,111,212,0.08)', borderWidth: 1, borderColor: 'rgba(59,111,212,0.15)', alignItems: 'center', justifyContent: 'center' },
+  uploadIconInner: { width: 72, height: 72, borderRadius: 36, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
+  uploadTitle: { fontSize: 18, fontWeight: '600', color: 'rgba(255,255,255,0.75)', letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
   formatRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   formatPill: { paddingHorizontal: 14, paddingVertical: 5, borderRadius: 20, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER },
   formatText: { fontSize: 11, fontWeight: '700', color: ACCENT, letterSpacing: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
   formatDivider: { width: 4, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)' },
-  uploadBottom: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingBottom: 18 },
-  uploadBottomText: { fontSize: 11, color: 'rgba(255,255,255,0.2)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
 
-  featureRow: { flexDirection: 'row', paddingHorizontal: 24, marginTop: 14, gap: 10 },
-  featureCard: {
-    flex: 1, alignItems: 'center', gap: 8,
-    backgroundColor: CARD_BG, borderRadius: 16,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)', paddingVertical: 14,
-  },
-  featureIconWrap: { width: 34, height: 34, borderRadius: 10, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  featureLabel: { fontSize: 10, fontWeight: '600', color: 'rgba(255,255,255,0.4)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-
-  howCard: { marginHorizontal: 24, marginTop: 14, backgroundColor: CARD_BG, borderRadius: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)', padding: 18, gap: 14 },
-  howTitle: { fontSize: 11, fontWeight: '600', color: 'rgba(255,255,255,0.28)', letterSpacing: 1.2, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  howSteps: { gap: 12 },
-  howStep:  { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  howNum:   { width: 22, height: 22, borderRadius: 11, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  howNumText: { fontSize: 10, fontWeight: '700', color: ACCENT, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  howIconWrap: { width: 32, height: 32, borderRadius: 9, backgroundColor: 'rgba(255,255,255,0.04)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', alignItems: 'center', justifyContent: 'center' },
-  howText:  { fontSize: 13, color: 'rgba(255,255,255,0.55)', flex: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-
-  // File section
   section:     { paddingHorizontal: 24, marginTop: 10, gap: 14 },
   attachCard:  { backgroundColor: CARD_BG, borderRadius: 20, borderWidth: 1, borderColor: ACCENT_BORDER, padding: 16, gap: 14 },
   fileRow:     { flexDirection: 'row', alignItems: 'center', gap: 12 },
@@ -650,12 +592,7 @@ const styles = StyleSheet.create({
   primaryBtn:  { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingVertical: 13, borderRadius: 12, backgroundColor: ACCENT },
   primaryBtnText: { fontSize: 14, fontWeight: '600', color: '#FFFFFF', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  // Done banner
-  doneBanner: {
-    backgroundColor: 'rgba(52,199,138,0.08)', borderRadius: 16,
-    borderWidth: 1, borderColor: 'rgba(52,199,138,0.2)',
-    padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-  },
+  doneBanner: { backgroundColor: 'rgba(52,199,138,0.08)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(52,199,138,0.2)', padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   doneBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   doneIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: 'rgba(52,199,138,0.12)', alignItems: 'center', justifyContent: 'center' },
   doneBannerTitle: { fontSize: 14, fontWeight: '600', color: SUCCESS, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
@@ -664,22 +601,22 @@ const styles = StyleSheet.create({
   doneStat:    { fontSize: 11, color: 'rgba(52,199,138,0.7)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
   doneStatDot: { width: 3, height: 3, borderRadius: 2, backgroundColor: 'rgba(52,199,138,0.4)' },
 
-  // Output grid
   outputGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  outputCard: {
-    width: (SW - 48 - 10) / 2,
-    backgroundColor: CARD_BG, borderRadius: 18,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
-    padding: 16, gap: 6,
-  },
+  outputCard: { width: (SW - 48 - 10) / 2, backgroundColor: CARD_BG, borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', padding: 16, gap: 6 },
+  outputCardLocked: { backgroundColor: 'rgba(255,255,255,0.01)', borderColor: 'rgba(255,255,255,0.03)' },
   outputCardTop:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
   outputIconWrap: { width: 40, height: 40, borderRadius: 12, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
+  outputIconWrapLocked: { backgroundColor: 'rgba(255,255,255,0.03)', borderColor: 'transparent' },
   outputCardLabel:{ fontSize: 15, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+  outputCardLabelLocked: { color: 'rgba(255,255,255,0.3)' },
   outputCardDesc: { fontSize: 11, color: 'rgba(255,255,255,0.35)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
   outputCardCount:{ alignSelf: 'flex-start', marginTop: 4, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
   outputCardCountText: { fontSize: 10, fontWeight: '600', color: ACCENT, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  // Content section
+  generatingOverlay: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(155,81,224,0.3)', padding: 30, alignItems: 'center', gap: 10, marginTop: 10 },
+  generatingText: { color: '#FFF', fontSize: 16, fontWeight: '700', marginTop: 10 },
+  generatingSubText: { color: 'rgba(255,255,255,0.5)', fontSize: 12 },
+
   contentSection: { gap: 12 },
   contentHeader:  { flexDirection: 'row', alignItems: 'center', gap: 12 },
   backBtn: { width: 34, height: 34, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },

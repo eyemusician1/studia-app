@@ -19,7 +19,7 @@ const DANGER        = '#FF5252';
 type Concept        = { term: string; definition: string };
 type Flashcard      = { question: string; answer: string };
 type QuizItem       = { question: string; options: string[]; correctIndex: number; explanation: string };
-type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz' | 'hardQuiz';
+type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz' | 'hardQuiz' | 'exam';
 
 type OfflineLesson = {
   id: string; 
@@ -31,6 +31,7 @@ type OfflineLesson = {
     flashcards: Flashcard[];
     quiz: QuizItem[];
     hardQuiz?: QuizItem[];
+    exam?: QuizItem[]; // Added exam to history type
   };
 };
 
@@ -141,13 +142,21 @@ export default function HistoryScreen() {
     }
   };
 
-  const OUTPUT_CARDS = studySession ? [
-    { key: 'summary'   as ActiveView, icon: 'align-left',   label: 'Summary',    desc: 'Document overview',   count: null },
-    { key: 'concepts'  as ActiveView, icon: 'tag',           label: 'Concepts',   desc: 'Key terms & ideas',   count: studySession.content.keyConceptsList?.length || 0 },
-    { key: 'flashcards'as ActiveView, icon: 'layers',        label: 'Flashcards', desc: 'Q&A study cards',     count: studySession.content.flashcards?.length || 0 },
-    { key: 'quiz'      as ActiveView, icon: 'check-square',  label: 'Quiz',       desc: 'Test your knowledge', count: studySession.content.quiz?.length || 0 },
-    { key: 'hardQuiz'  as ActiveView, icon: 'award',         label: 'Hard Quiz',  desc: '15 Challenge questions', count: studySession.content.hardQuiz?.length || 0 },
-  ] : [];
+  const getOutputCards = () => {
+    if (!studySession) return [];
+    const cards = [
+      { key: 'summary'   as ActiveView, icon: 'align-left',   label: 'Summary',    desc: 'Document overview',   count: null },
+      { key: 'concepts'  as ActiveView, icon: 'tag',          label: 'Concepts',   desc: 'Key terms & ideas',   count: studySession.content.keyConceptsList?.length || 0 },
+      { key: 'flashcards'as ActiveView, icon: 'layers',       label: 'Flashcards', desc: 'Q&A study cards',     count: studySession.content.flashcards?.length || 0 },
+      { key: 'quiz'      as ActiveView, icon: 'check-square', label: 'Quiz',       desc: 'Test your knowledge', count: studySession.content.quiz?.length || 0 },
+      { key: 'hardQuiz'  as ActiveView, icon: 'award',        label: 'Hard Quiz',  desc: '15 Challenge questions', count: studySession.content.hardQuiz?.length || 0 },
+    ];
+    // Only show Exam card in history if it was successfully generated for this lesson
+    if (studySession.content.exam) {
+      cards.push({ key: 'exam' as ActiveView, icon: 'file-text', label: 'Final Exam', desc: '50-Item Challenge', count: studySession.content.exam.length });
+    }
+    return cards;
+  };
 
   return (
     <View style={styles.container}>
@@ -239,7 +248,7 @@ export default function HistoryScreen() {
               
               {!activeView && studySession && (
                 <View style={styles.outputGrid}>
-                  {OUTPUT_CARDS.map((card) => (
+                  {getOutputCards().map((card) => (
                     <TouchableOpacity key={card.key} style={styles.outputCard} onPress={() => setActiveView(card.key)} activeOpacity={0.8}>
                       <View style={styles.outputCardTop}>
                         <View style={styles.outputIconWrap}><Feather name={card.icon as any} size={20} color={ACCENT} /></View>
@@ -284,6 +293,11 @@ export default function HistoryScreen() {
               {activeView === 'hardQuiz' && studySession && (
                 <View style={styles.quizList}>
                   {studySession.content.hardQuiz?.map((q, i) => <QuizCard key={`hard-quiz-${i}`} item={q} index={i} />)}
+                </View>
+              )}
+              {activeView === 'exam' && studySession && (
+                <View style={styles.quizList}>
+                  {studySession.content.exam?.map((q, i) => <QuizCard key={`exam-q-${i}`} item={q} index={i} />)}
                 </View>
               )}
 
@@ -335,7 +349,16 @@ const styles = StyleSheet.create({
   deleteBtn: { padding: 10, borderRadius: 12, backgroundColor: 'rgba(255,82,82,0.1)', borderWidth: 1, borderColor: 'rgba(255,82,82,0.2)' },
 
   modalContainer: { flex: 1, backgroundColor: '#0C0D12' },
-  modalHeader: { flexDirection: 'row', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)', backgroundColor: '#0C0D12' },
+ modalHeader: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    padding: 20, 
+    // This line dynamically adds padding based on the phone's status bar height
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) + 15 : 20, 
+    borderBottomWidth: 1, 
+    borderBottomColor: 'rgba(255,255,255,0.05)', 
+    backgroundColor: '#0C0D12' 
+  },
   modalBackBtn: { padding: 5, marginRight: 15 },
   modalTitleContainer: { flex: 1 },
   modalTitle: { color: '#FFF', fontSize: 16, fontWeight: '700', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
