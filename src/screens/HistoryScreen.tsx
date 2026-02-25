@@ -31,7 +31,7 @@ type OfflineLesson = {
     flashcards: Flashcard[];
     quiz: QuizItem[];
     hardQuiz?: QuizItem[];
-    exam?: QuizItem[]; // Added exam to history type
+    exam?: QuizItem[];
   };
 };
 
@@ -111,6 +111,9 @@ export default function HistoryScreen() {
   const [studySession, setStudySession] = useState<OfflineLesson | null>(null);
   const [activeView, setActiveView]     = useState<ActiveView>(null);
 
+  // --- NEW: State for our custom delete modal ---
+  const [deleteCandidate, setDeleteCandidate] = useState<{ id: string, fileName: string } | null>(null);
+
   useFocusEffect(
     useCallback(() => {
       loadOfflineHistory();
@@ -132,13 +135,22 @@ export default function HistoryScreen() {
     setLoading(false);
   };
 
-  const handleDelete = async (id: string) => {
+  // Triggers the custom modal instead of native Alert
+  const handleDeleteClick = (id: string, fileName: string) => {
+    setDeleteCandidate({ id, fileName });
+  };
+
+  // Executes the actual deletion
+  const confirmDelete = async () => {
+    if (!deleteCandidate) return;
     try {
-      const updatedResults = results.filter(r => r.id !== id);
+      const updatedResults = results.filter(r => r.id !== deleteCandidate.id);
       setResults(updatedResults);
       await AsyncStorage.setItem('@studia_history', JSON.stringify(updatedResults));
     } catch (error) {
       console.error("Failed to delete lesson", error);
+    } finally {
+      setDeleteCandidate(null); // Hide modal
     }
   };
 
@@ -149,9 +161,8 @@ export default function HistoryScreen() {
       { key: 'concepts'  as ActiveView, icon: 'tag',          label: 'Concepts',   desc: 'Key terms & ideas',   count: studySession.content.keyConceptsList?.length || 0 },
       { key: 'flashcards'as ActiveView, icon: 'layers',       label: 'Flashcards', desc: 'Q&A study cards',     count: studySession.content.flashcards?.length || 0 },
       { key: 'quiz'      as ActiveView, icon: 'check-square', label: 'Quiz',       desc: 'Test your knowledge', count: studySession.content.quiz?.length || 0 },
-      { key: 'hardQuiz'  as ActiveView, icon: 'award',        label: 'Hard Quiz',  desc: '15 Challenge questions', count: studySession.content.hardQuiz?.length || 0 },
+      { key: 'hardQuiz'  as ActiveView, icon: 'award',        label: 'Hard Quiz',  desc: '5 Challenge questions', count: studySession.content.hardQuiz?.length || 0 },
     ];
-    // Only show Exam card in history if it was successfully generated for this lesson
     if (studySession.content.exam) {
       cards.push({ key: 'exam' as ActiveView, icon: 'file-text', label: 'Final Exam', desc: '50-Item Challenge', count: studySession.content.exam.length });
     }
@@ -217,7 +228,8 @@ export default function HistoryScreen() {
                           <Feather name="play" size={14} color="#FFF" />
                           <Text style={styles.studyBtnText}>Study Now</Text>
                         </TouchableOpacity>
-                        <TouchableOpacity style={styles.deleteBtn} onPress={() => handleDelete(item.id)} activeOpacity={0.7}>
+                        {/* --- Trash Button Triggers Custom Modal --- */}
+                        <TouchableOpacity style={styles.deleteBtn} onPress={() => handleDeleteClick(item.id, item.fileName)} activeOpacity={0.7}>
                           <Feather name="trash-2" size={14} color="#FF5252" />
                         </TouchableOpacity>
                       </View>
@@ -230,6 +242,31 @@ export default function HistoryScreen() {
         )}
       </SafeAreaView>
 
+      {/* --- NEW CUSTOM DELETE CONFIRMATION MODAL --- */}
+      <Modal visible={!!deleteCandidate} transparent animationType="fade" onRequestClose={() => setDeleteCandidate(null)}>
+        <View style={styles.alertOverlay}>
+          <View style={styles.alertBox}>
+            <View style={styles.alertIconWrap}>
+              <Feather name="trash-2" size={26} color={DANGER} />
+            </View>
+            <Text style={styles.alertTitle}>Delete File?</Text>
+            <Text style={styles.alertDesc}>
+              Are you sure you want to remove <Text style={{ fontWeight: 'bold', color: '#FFF' }}>"{deleteCandidate?.fileName}"</Text> from your history? This action cannot be undone.
+            </Text>
+            
+            <View style={styles.alertRow}>
+              <TouchableOpacity style={styles.alertCancelBtn} onPress={() => setDeleteCandidate(null)} activeOpacity={0.7}>
+                <Text style={styles.alertCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.alertConfirmBtn} onPress={confirmDelete} activeOpacity={0.7}>
+                <Text style={styles.alertConfirmText}>Delete</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* --- EXISTING FULL SCREEN STUDY MODAL --- */}
       <Modal visible={!!studySession} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setStudySession(null)}>
         <View style={styles.modalContainer}>
           <RNSafeAreaView style={{ flex: 1 }}>
@@ -348,12 +385,23 @@ const styles = StyleSheet.create({
   studyBtnText: { color: '#FFF', fontSize: 13, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
   deleteBtn: { padding: 10, borderRadius: 12, backgroundColor: 'rgba(255,82,82,0.1)', borderWidth: 1, borderColor: 'rgba(255,82,82,0.2)' },
 
+  // --- NEW ALERT MODAL STYLES ---
+  alertOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  alertBox: { width: '100%', backgroundColor: '#13141C', borderRadius: 24, padding: 24, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,82,82,0.2)' },
+  alertIconWrap: { width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(255,82,82,0.1)', alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
+  alertTitle: { fontSize: 18, fontWeight: '700', color: '#FFFFFF', marginBottom: 8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+  alertDesc: { fontSize: 13, color: 'rgba(255,255,255,0.5)', textAlign: 'center', lineHeight: 20, marginBottom: 24, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  alertRow: { flexDirection: 'row', gap: 12, width: '100%' },
+  alertCancelBtn: { flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.06)', alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
+  alertCancelText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  alertConfirmBtn: { flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: DANGER, alignItems: 'center' },
+  alertConfirmText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+
   modalContainer: { flex: 1, backgroundColor: '#0C0D12' },
- modalHeader: { 
+  modalHeader: { 
     flexDirection: 'row', 
     alignItems: 'center', 
     padding: 20, 
-    // This line dynamically adds padding based on the phone's status bar height
     paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) + 15 : 20, 
     borderBottomWidth: 1, 
     borderBottomColor: 'rgba(255,255,255,0.05)', 

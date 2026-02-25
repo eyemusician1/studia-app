@@ -1,6 +1,10 @@
-// supabase/functions/analyze-material/index.ts
+// supabase/functions/analyze-material/index.ts//
+//@ts-nocheck
+//@ts-ignore
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+//@ts-ignore
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+//@ts-ignore
 import { encodeBase64 } from "https://deno.land/std@0.208.0/encoding/base64.ts";
 
 const corsHeaders = {
@@ -44,10 +48,10 @@ Rules:
 - CRITICAL: Keep all definitions, answers, and explanations to a MAXIMUM of 15 words. Be extremely brief and concise.
 - Return ONLY valid JSON, no markdown, no extra text`;
 
-// ── LlamaParse PDF extraction ────────────────────────────────────────────────
-async function extractWithLlamaParse(bytes: Uint8Array, fileName: string, apiKey: string): Promise<string> {
+// ── LlamaParse Document extraction (Handles both PDF and DOCX) ───────────────
+async function extractWithLlamaParse(bytes: Uint8Array, fileName: string, mimeType: string, apiKey: string): Promise<string> {
   const formData = new FormData();
-  const blob = new Blob([bytes], { type: 'application/pdf' });
+  const blob = new Blob([bytes], { type: mimeType });
   formData.append('file', blob, fileName);
   formData.append('language', 'en');
 
@@ -112,7 +116,7 @@ async function tryGemini(base64: string, mimeType: string, apiKey: string): Prom
           generationConfig: { 
             temperature: 0.3, 
             maxOutputTokens: 8192,
-            response_mime_type: "application/json" // Strict JSON mode
+            response_mime_type: "application/json" 
           },
         }),
       }
@@ -158,24 +162,44 @@ serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   try {
-    const { storagePath, fileName, userId } = await req.json();
-    console.log('Request:', { storagePath, fileName, userId });
+    const { storagePath, fileName } = await req.json(); // We no longer blindly trust the frontend's userId!
+    console.log('Request:', { storagePath, fileName });
 
-    if (!storagePath || !userId) {
-      return new Response(JSON.stringify({ success: false, error: 'Missing storagePath or userId' }),
+    if (!storagePath) {
+      return new Response(JSON.stringify({ success: false, error: 'Missing storagePath' }),
         { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
+
+    // --- SECURE IDENTITY VERIFICATION ---
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) throw new Error('Missing Authorization header. You must be logged in.');
+    const token = authHeader.replace('Bearer ', '');
+
+    // We use the ANON key to securely decode and verify the JWT Token
+    const supabaseSecure = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_ANON_KEY')!
+    );
+
+    const { data: { user }, error: authError } = await supabaseSecure.auth.getUser(token);
+    if (authError || !user) throw new Error('Unauthorized: Invalid or expired session token.');
+
+    // We now have cryptographically guaranteed proof of who this user is.
+    const verifiedUserId = user.id;
+    // ------------------------------------
 
     const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
     const GROQ_API_KEY   = Deno.env.get('GROQ_API_KEY');
 
-    // 1. Download
-    const supabase = createClient(
+    // Initialize admin client to bypass RLS for edge function processing
+    const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     );
+
+    // 1. Download
     console.log('Downloading...');
-    const { data: fileData, error: downloadError } = await supabase.storage
+    const { data: fileData, error: downloadError } = await supabaseAdmin.storage
       .from('study-materials').download(storagePath);
     if (downloadError || !fileData) throw new Error(`Download failed: ${downloadError?.message}`);
 
@@ -190,30 +214,28 @@ serve(async (req) => {
     // 2. Base64 for Gemini (Safer encoding method)
     const base64 = encodeBase64(fileBytes);
 
-    // 3. Try Gemini
+    // 3. Try Gemini (ONLY if it is a PDF!)
     let rawText: string | null = null;
-    if (GEMINI_API_KEY) rawText = await tryGemini(base64, mimeType, GEMINI_API_KEY);
+    if (GEMINI_API_KEY && isPdf) {
+      rawText = await tryGemini(base64, mimeType, GEMINI_API_KEY);
+    }
 
-    // 4. Fallback to Groq with text extraction
+    // 4. Fallback to Groq with LlamaParse extraction (Handles both PDF & DOCX)
     if (!rawText && GROQ_API_KEY) {
-      console.log('Gemini failed — falling back to LlamaParse + Groq...');
+      if (isPdf) {
+        console.log('Gemini failed — falling back to LlamaParse + Groq...');
+      } else {
+        console.log('DOCX detected — skipping Gemini, routing directly to LlamaParse + Groq...');
+      }
+
       const LLAMAPARSE_API_KEY = Deno.env.get('LLAMAPARSE_API_KEY');
       
       let extracted = '';
-      if (isPdf && LLAMAPARSE_API_KEY) {
+      if (LLAMAPARSE_API_KEY) {
         try {
-          extracted = await extractWithLlamaParse(fileBytes, fileName, LLAMAPARSE_API_KEY);
+          extracted = await extractWithLlamaParse(fileBytes, fileName, mimeType, LLAMAPARSE_API_KEY);
         } catch (e: any) {
           console.error('LlamaParse error:', e.message);
-        }
-      }
-
-      // DOCX fallback — read XML w:t tags
-      if (!extracted || extracted.length < 50) {
-        if (!isPdf) {
-          const raw = new TextDecoder('utf-8', { fatal: false }).decode(fileBytes);
-          const matches = [...raw.matchAll(/<w:t[^>]*>([^<]+)<\/w:t>/g)];
-          extracted = matches.map(m => m[1].trim()).filter(s => s.length > 0).join(' ').replace(/\s+/g, ' ').trim();
         }
       }
 
@@ -235,11 +257,15 @@ serve(async (req) => {
       throw new Error(`Failed to parse AI response: ${e.message}`);
     }
 
-    // 6. Save to Supabase DB
-    const { error: dbError } = await supabase.from('study_results').insert({
-      user_id: userId, file_name: fileName, storage_path: storagePath,
-      summary: analysisResult.summary, key_concepts: analysisResult.keyConceptsList,
-      flashcards: analysisResult.flashcards, quiz: analysisResult.quiz,
+    // 6. Save to Supabase DB using the verified user ID
+    const { error: dbError } = await supabaseAdmin.from('study_results').insert({
+      user_id: verifiedUserId, // SECURITY FIX: using cryptographically verified ID
+      file_name: fileName, 
+      storage_path: storagePath,
+      summary: analysisResult.summary, 
+      key_concepts: analysisResult.keyConceptsList,
+      flashcards: analysisResult.flashcards, 
+      quiz: analysisResult.quiz,
       hard_quiz: analysisResult.hardQuiz,
     });
     
@@ -259,7 +285,6 @@ serve(async (req) => {
 
   } catch (err: any) {
     console.error('FATAL:', err.message);
-    // FIX: Status 200 allows the React Native app to actually read this error message!
     return new Response(
       JSON.stringify({ success: false, error: err.message ?? 'Internal server error' }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

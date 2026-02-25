@@ -7,10 +7,11 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { Feather } from '@expo/vector-icons';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { decode } from 'base64-arraybuffer';
 
 const ACCENT        = '#3B6FD4';
 const ACCENT_DIM    = 'rgba(59,111,212,0.10)';
@@ -33,6 +34,13 @@ function formatBytes(b: number) {
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+// Helper to safely parse storage numbers
+const parseQuotaValue = (value: string | null): number => {
+  if (value == null) return 0;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+};
 
 function FlashCard({ card }: { card: Flashcard }) {
   const [flipped, setFlipped] = useState(false);
@@ -91,26 +99,47 @@ export default function HomeScreen() {
   const [result,      setResult]      = useState<AnalysisResult | null>(null);
   const [activeView,  setActiveView]  = useState<ActiveView>(null);
 
-  // Exam Generation Mechanics
   const [uploadedFilePath, setUploadedFilePath] = useState<string | null>(null);
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
-  const [examQuotaUsed, setExamQuotaUsed]       = useState(0);
   const [isGeneratingExam, setIsGeneratingExam] = useState(false);
+
+  const MAX_DAILY_UPLOADS = 3;
+  const MAX_DAILY_EXAMS   = 1;
+
+  const [uploadQuotaUsed, setUploadQuotaUsed] = useState(0);
+  const [examQuotaUsed, setExamQuotaUsed]     = useState(0);
 
   const cardScale    = useRef(new Animated.Value(1)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
   const doneAnim     = useRef(new Animated.Value(0)).current;
 
-  // The isWorking check helps us disable buttons when AI is thinking
   const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
 
   useEffect(() => {
-    const loadQuota = async () => {
+    const loadDailyQuotas = async () => {
       if (!user) return;
-      const quota = await AsyncStorage.getItem(`@studia_exam_quota_${user.id}`);
-      if (quota) setExamQuotaUsed(parseInt(quota));
+      
+      const today = new Date().toLocaleDateString();
+      try {
+        const storedDate = await AsyncStorage.getItem(`@studia_date_${user.id}`);
+
+        if (storedDate !== today) {
+          await AsyncStorage.setItem(`@studia_date_${user.id}`, today);
+          await AsyncStorage.setItem(`@studia_upload_quota_${user.id}`, '0');
+          await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, '0');
+          setUploadQuotaUsed(0);
+          setExamQuotaUsed(0);
+        } else {
+          const uQuota = await AsyncStorage.getItem(`@studia_upload_quota_${user.id}`);
+          const eQuota = await AsyncStorage.getItem(`@studia_exam_quota_${user.id}`);
+          setUploadQuotaUsed(parseQuotaValue(uQuota));
+          setExamQuotaUsed(parseQuotaValue(eQuota));
+        }
+      } catch (err) {
+        console.error("Error loading quotas", err);
+      }
     };
-    loadQuota();
+    loadDailyQuotas();
   }, [user]);
 
   const bumpScale = () => {
@@ -121,23 +150,29 @@ export default function HomeScreen() {
   };
 
   const animateProgress = (to: number) => Animated.timing(progressAnim, { toValue: to, duration: 400, easing: Easing.out(Easing.cubic), useNativeDriver: false }).start();
+  
+  // This triggers the smooth bounce animation for our new success banner
   const showDoneBanner = () => { doneAnim.setValue(0); Animated.spring(doneAnim, { toValue: 1, tension: 120, friction: 10, useNativeDriver: true }).start(); };
 
   const handlePick = async () => {
     bumpScale();
+
+    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) {
+      Alert.alert(
+        "Daily Limit Reached", 
+        "You have used your 3 free document uploads for today. Please come back tomorrow."
+      );
+      return; 
+    }
+
     const res = await DocumentPicker.getDocumentAsync({ type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'], copyToCacheDirectory: true });
     if (!res.canceled) {
       const asset = res.assets[0];
 
-      // --- NEW SIZE LIMIT CHECK ---
       if (asset.size && asset.size > 5 * 1024 * 1024) {
-        Alert.alert(
-          "File Too Large", 
-          "Please upload a document smaller than 5MB."
-        );
-        return; // Stops the upload completely
+        Alert.alert("File Too Large", "Please upload a document smaller than 5MB.");
+        return; 
       }
-      // ----------------------------
 
       setPickedFile({ name: asset.name, uri: asset.uri, size: asset.size ?? 0, mimeType: asset.mimeType ?? 'application/octet-stream' });
       setUploadState('idle'); setResult(null); setActiveView(null); setErrorMsg(''); setUploadedFilePath(null); setCurrentHistoryId(null);
@@ -149,6 +184,12 @@ export default function HomeScreen() {
 
   const handleAnalyze = async () => {
     if (!pickedFile || !user) return;
+
+    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) {
+      Alert.alert("Daily Limit Reached", "You have used your 3 free document uploads for today.");
+      return; 
+    }
+
     try {
       setUploadState('uploading'); animateProgress(0.15);
       const nameParts = pickedFile.name.split('.');
@@ -158,27 +199,17 @@ export default function HomeScreen() {
       setUploadedFilePath(storagePath); 
 
       animateProgress(0.35);
-      const base64 = await FileSystem.readAsStringAsync(pickedFile.uri, { encoding: FileSystem.EncodingType.Base64 });
-      const binaryStr = base64.replace(/[^A-Za-z0-9+/=]/g, '');
-      const byteCount = Math.floor(binaryStr.length * 3 / 4);
-      const byteArray = new Uint8Array(byteCount);
-      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-      const lut: number[] = new Array(256).fill(-1);
-      for (let i = 0; i < chars.length; i++) lut[chars.charCodeAt(i)] = i;
-      let out = 0;
-      for (let i = 0; i < binaryStr.length - 3; i += 4) {
-        const c0 = lut[binaryStr.charCodeAt(i)] ?? 0; const c1 = lut[binaryStr.charCodeAt(i+1)] ?? 0; const c2 = lut[binaryStr.charCodeAt(i+2)] ?? 0; const c3 = lut[binaryStr.charCodeAt(i+3)] ?? 0;
-        byteArray[out++] = (c0 << 2) | (c1 >> 4);
-        if (binaryStr[i+2] !== '=') byteArray[out++] = ((c1 & 0xf) << 4) | (c2 >> 2);
-        if (binaryStr[i+3] !== '=') byteArray[out++] = ((c2 & 0x3) << 6) | c3;
-      }
-      const uploadBytes = byteArray.slice(0, out);
-      const { data: uploadData, error: uploadError } = await supabase.storage.from('study-materials').upload(storagePath, uploadBytes, { contentType: pickedFile.mimeType, upsert: false });
+      
+      const base64Str = await FileSystem.readAsStringAsync(pickedFile.uri, { encoding: FileSystem.EncodingType.Base64 });
+      const fileData = decode(base64Str);
+      
+      const { data: uploadData, error: uploadError } = await supabase.storage.from('study-materials').upload(storagePath, fileData, { contentType: pickedFile.mimeType, upsert: false });
       if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
       
       animateProgress(0.55); setUploadState('analyzing'); animateProgress(0.75);
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('No active session.');
+      
       const { data: fnData, error: fnError } = await supabase.functions.invoke('analyze-material', {
         body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id }, headers: { Authorization: `Bearer ${session.access_token}` },
       });
@@ -194,39 +225,47 @@ export default function HomeScreen() {
         setCurrentHistoryId(historyId); 
         const newLesson = { id: historyId, fileName: pickedFile.name, date: new Date().toLocaleDateString(), content: generatedData };
         const existingHistory = await AsyncStorage.getItem('@studia_history');
-        let historyArray = existingHistory ? JSON.parse(existingHistory) : [];
+        
+        let historyArray = [];
+        if (existingHistory) {
+          try {
+             historyArray = JSON.parse(existingHistory);
+          } catch (e) {
+             console.error("Corrupted history JSON found, resetting.");
+          }
+        }
         historyArray.unshift(newLesson);
         await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
-      } catch (e) { console.error(e); }
+      } catch (e) { console.error("History save failed:", e); }
+
+      if (user) {
+        const newUploadQuota = uploadQuotaUsed + 1;
+        setUploadQuotaUsed(newUploadQuota);
+        await AsyncStorage.setItem(`@studia_upload_quota_${user.id}`, newUploadQuota.toString());
+      }
 
       setUploadState('done'); setActiveView(null); showDoneBanner();
-      
-      // Friendly Success Alert
-      Alert.alert("Success!", "Your study materials are ready.");
+      // Removed the Alert popup for a smoother, subtle animated UI experience!
 
     } catch (err: any) {
       setUploadState('error');
       console.error("Upload error:", err);
-      const errorMessage = err?.message?.toLowerCase() || '';
       
-      // --- NEW FRIENDLY ERROR HANDLING ---
-      if (errorMessage.includes('json') || errorMessage.includes('546') || errorMessage.includes('timeout') || errorMessage.includes('429') || errorMessage.includes('limit')) {
-        Alert.alert(
-          "Server is Catching its Breath!", 
-          "A lot of students are studying right now, and our free AI server is quite busy. Please wait 10 seconds and try again!"
-        );
+      const structuredErrorType = err?.errorType ?? err?.code ?? null;
+      const errorMessage = err?.message?.toLowerCase() || '';
+
+      const isRateLimit = structuredErrorType === 'rate_limited' || structuredErrorType === '429' || (!structuredErrorType && (errorMessage.includes('429') || errorMessage.includes('limit') || errorMessage.includes('too many requests')));
+      const isTimeout = structuredErrorType === 'timeout' || (!structuredErrorType && (errorMessage.includes('timeout') || errorMessage.includes('timed out')));
+      const isJsonError = structuredErrorType === 'json_parse_error' || (!structuredErrorType && (errorMessage.includes('json') || errorMessage.includes('546')));
+
+      if (isRateLimit || isTimeout || isJsonError) {
+        Alert.alert("Server is Catching its Breath!", "A lot of students are studying right now, and our free AI server is quite busy. Please wait 10 seconds and try again!");
         setErrorMsg("Server busy. Please wait 10 seconds and retry.");
       } else if (errorMessage.includes('network') || errorMessage.includes('failed to fetch')) {
-        Alert.alert(
-          "No Internet Connection", 
-          "Please check your Wi-Fi or mobile data and try again."
-        );
+        Alert.alert("No Internet Connection", "Please check your Wi-Fi or mobile data and try again.");
         setErrorMsg("No internet connection.");
       } else {
-        Alert.alert(
-          "Analysis Failed", 
-          "We couldn't read this specific file. Please make sure it is a standard text-based PDF or DOCX."
-        );
+        Alert.alert("Analysis Failed", "We couldn't read this specific file. Please make sure it is a standard text-based PDF or DOCX.");
         setErrorMsg("Failed to read document.");
       }
       animateProgress(0);
@@ -237,6 +276,11 @@ export default function HomeScreen() {
     if (!uploadedFilePath || !currentHistoryId) {
       Alert.alert("Error", "Missing file data. Please re-upload the document.");
       return;
+    }
+
+    if (examQuotaUsed >= MAX_DAILY_EXAMS) {
+      Alert.alert("Daily Limit Reached", "You have used your 1 free exam generation for today. Please come back tomorrow.");
+      return; 
     }
 
     try {
@@ -260,15 +304,17 @@ export default function HomeScreen() {
 
       setResult(prev => prev ? { ...prev, exam: newExam } : null);
 
-      const existingHistoryStr = await AsyncStorage.getItem('@studia_history');
-      if (existingHistoryStr) {
-        let historyArray = JSON.parse(existingHistoryStr);
-        const index = historyArray.findIndex((item: any) => item.id === currentHistoryId);
-        if (index !== -1) {
-          historyArray[index].content.exam = newExam;
-          await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
+      try {
+        const existingHistoryStr = await AsyncStorage.getItem('@studia_history');
+        if (existingHistoryStr) {
+          let historyArray = JSON.parse(existingHistoryStr);
+          const index = historyArray.findIndex((item: any) => item.id === currentHistoryId);
+          if (index !== -1) {
+            historyArray[index].content.exam = newExam;
+            await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
+          }
         }
-      }
+      } catch (e) { console.error("Failed to save exam to history:", e); }
 
       if (user) {
         const newQuota = examQuotaUsed + 1;
@@ -285,7 +331,8 @@ export default function HomeScreen() {
     }
   };
 
-  const remainingExams = Math.max(0, 2 - examQuotaUsed);
+  const uploadsLeft = Math.max(0, MAX_DAILY_UPLOADS - uploadQuotaUsed);
+  const examsLeft   = Math.max(0, MAX_DAILY_EXAMS - examQuotaUsed);
 
   const OUTPUT_CARDS = [
     { key: 'summary'   as ActiveView, icon: 'align-left',   label: 'Summary',    desc: 'Document overview',   count: null },
@@ -297,9 +344,9 @@ export default function HomeScreen() {
       key: 'exam'      as ActiveView, 
       icon: 'file-text',    
       label: 'Final Exam', 
-      desc: result?.exam ? 'University Level' : `${remainingExams} remaining`, 
+      desc: result?.exam ? 'University Level' : `${examsLeft} remaining today`, 
       count: result?.exam?.length, 
-      isLocked: !result?.exam && examQuotaUsed >= 2 
+      isLocked: !result?.exam && examQuotaUsed >= MAX_DAILY_EXAMS 
     },
   ];
 
@@ -311,11 +358,7 @@ export default function HomeScreen() {
 
           <View style={styles.header}>
             <View style={styles.headerLeft}>
-              <Image 
-                source={require('../../assets/logo.png')} 
-                style={styles.logoImage} 
-                resizeMode="contain"
-              />
+              <Image source={require('../../assets/icon.png')} style={styles.logoImage} resizeMode="contain" />
               <Text style={styles.appName}>Studia</Text>
             </View>
             <View style={styles.avatar}>
@@ -323,16 +366,10 @@ export default function HomeScreen() {
             </View>
           </View>
 
-          {/* Centered Upload State */}
           {!pickedFile && (
             <View style={styles.idleContainer}>
               <Animated.View style={[styles.uploadCard, { transform: [{ scale: cardScale }] }]}>
-                <TouchableOpacity 
-                  style={[styles.uploadTouchable, isWorking && { opacity: 0.5 }]} 
-                  onPress={handlePick} 
-                  activeOpacity={1}
-                  disabled={isWorking}
-                >
+                <TouchableOpacity style={[styles.uploadTouchable, isWorking && { opacity: 0.5 }]} onPress={handlePick} activeOpacity={1} disabled={isWorking}>
                   <View style={styles.gridLines} pointerEvents="none">
                     {[0,1,2,3].map(i => <View key={`h${i}`} style={[styles.gridLine,  { top:  `${25*(i+1)}%` as any }]} />)}
                     {[0,1,2,3].map(i => <View key={`v${i}`} style={[styles.gridLineV, { left: `${25*(i+1)}%` as any }]} />)}
@@ -359,7 +396,9 @@ export default function HomeScreen() {
                         <View style={styles.formatDivider} />
                         <View style={styles.formatPill}><Text style={styles.formatText}>DOCX</Text></View>
                       </View>
-                      <Text style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 }}>Max file size: 5MB</Text>
+                      <Text style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 }}>
+                        Max file size: 5MB • <Text style={{ color: uploadsLeft === 0 ? DANGER : SUCCESS, fontWeight: 'bold' }}>{uploadsLeft} uploads left today</Text>
+                      </Text>
                     </View>
                   )}
                 </TouchableOpacity>
@@ -431,44 +470,63 @@ export default function HomeScreen() {
                 )}
               </View>
 
+              {/* --- NEW ANIMATED SUCCESS BANNER & OUTPUT GRID --- */}
               {result && uploadState === 'done' && activeView === null && !isGeneratingExam && (
-                <View style={styles.outputGrid}>
-                  {OUTPUT_CARDS.map((card) => {
-                    const isLocked = card.isLocked;
-                    return (
-                      <TouchableOpacity
-                        key={card.key}
-                        style={[styles.outputCard, isLocked && styles.outputCardLocked]}
-                        onPress={() => {
-                          if (card.key === 'exam' && !result?.exam) {
-                            if (isLocked) Alert.alert("Limit Reached", "You have already used your 2 exam generations to prevent AI exhaustion.");
-                            else handleGenerateExam();
-                          } else {
-                            setActiveView(card.key);
-                          }
-                        }}
-                        activeOpacity={isLocked ? 1 : 0.8}
-                      >
-                        <View style={styles.outputCardTop}>
-                          <View style={[styles.outputIconWrap, isLocked && styles.outputIconWrapLocked]}>
-                            <Feather name={isLocked ? "lock" : card.icon as any} size={20} color={isLocked ? "rgba(255,255,255,0.4)" : ACCENT} />
-                          </View>
-                          {!isLocked && <Feather name="arrow-right" size={14} color="rgba(255,255,255,0.2)" />}
+                <View style={{ gap: 14 }}>
+                  <Animated.View style={{
+                    opacity: doneAnim,
+                    transform: [{ translateY: doneAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) }]
+                  }}>
+                    <View style={styles.doneBanner}>
+                      <View style={styles.doneBannerLeft}>
+                        <View style={styles.doneIconWrap}>
+                          <Feather name="check" size={18} color={SUCCESS} />
                         </View>
-                        <Text style={[styles.outputCardLabel, isLocked && styles.outputCardLabelLocked]}>{card.label}</Text>
-                        <Text style={styles.outputCardDesc}>{card.desc}</Text>
-                        {card.count != null && (
-                          <View style={styles.outputCardCount}>
-                            <Text style={styles.outputCardCountText}>{card.count} items</Text>
+                        <View>
+                          <Text style={styles.doneBannerTitle}>Analysis Complete!</Text>
+                          <Text style={styles.doneBannerSub}>Select a category below to start studying.</Text>
+                        </View>
+                      </View>
+                    </View>
+                  </Animated.View>
+
+                  <View style={styles.outputGrid}>
+                    {OUTPUT_CARDS.map((card) => {
+                      const isLocked = card.isLocked;
+                      return (
+                        <TouchableOpacity
+                          key={card.key}
+                          style={[styles.outputCard, isLocked && styles.outputCardLocked]}
+                          onPress={() => {
+                            if (card.key === 'exam' && !result?.exam) {
+                              if (isLocked) Alert.alert("Limit Reached", "You have already used your 1 exam generation for today.");
+                              else handleGenerateExam();
+                            } else {
+                              setActiveView(card.key);
+                            }
+                          }}
+                          activeOpacity={isLocked ? 1 : 0.8}
+                        >
+                          <View style={styles.outputCardTop}>
+                            <View style={[styles.outputIconWrap, isLocked && styles.outputIconWrapLocked]}>
+                              <Feather name={isLocked ? "lock" : card.icon as any} size={20} color={isLocked ? "rgba(255,255,255,0.4)" : ACCENT} />
+                            </View>
+                            {!isLocked && <Feather name="arrow-right" size={14} color="rgba(255,255,255,0.2)" />}
                           </View>
-                        )}
-                      </TouchableOpacity>
-                    );
-                  })}
+                          <Text style={[styles.outputCardLabel, isLocked && styles.outputCardLabelLocked]}>{card.label}</Text>
+                          <Text style={styles.outputCardDesc}>{card.desc}</Text>
+                          {card.count != null && (
+                            <View style={styles.outputCardCount}>
+                              <Text style={styles.outputCardCountText}>{card.count} items</Text>
+                            </View>
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
                 </View>
               )}
 
-              {/* ── Generating Exam Overlay ── */}
               {isGeneratingExam && (
                 <View style={styles.generatingOverlay}>
                   <ActivityIndicator size="large" color="#9B51E0" />
@@ -477,7 +535,6 @@ export default function HomeScreen() {
                 </View>
               )}
 
-              {/* ── Active Content View ── */}
               {result && activeView !== null && (
                 <View style={styles.contentSection}>
                   <View style={styles.contentHeader}>
@@ -556,6 +613,10 @@ const styles = StyleSheet.create({
 
   idleContainer: { flex: 1, justifyContent: 'center', paddingBottom: 40 },
   idleSubtitle: { textAlign: 'center', color: 'rgba(255,255,255,0.4)', fontSize: 13, marginTop: 24, paddingHorizontal: 40, lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+  tipBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(59,111,212,0.08)', borderWidth: 1, borderColor: 'rgba(59,111,212,0.15)', borderRadius: 12, padding: 12, marginHorizontal: 24, marginTop: 16, gap: 10 },
+  tipIconWrap: { width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(59,111,212,0.15)', alignItems: 'center', justifyContent: 'center' },
+  tipText: { flex: 1, fontSize: 12, color: 'rgba(255,255,255,0.6)', lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
 
   uploadCard: { marginHorizontal: 24, height: SW * 0.72, borderRadius: 24, backgroundColor: 'rgba(59,111,212,0.05)', borderWidth: 1.5, borderColor: ACCENT_BORDER, borderStyle: 'dashed', overflow: 'hidden' },
   uploadTouchable: { flex: 1 },
