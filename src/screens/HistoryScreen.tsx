@@ -8,13 +8,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
+import { useTheme } from '../context/ThemeContext'; // <-- NEW IMPORT
 
-const ACCENT        = '#3B6FD4';
-const ACCENT_DIM    = 'rgba(59,111,212,0.10)';
-const ACCENT_BORDER = 'rgba(59,111,212,0.22)';
-const CARD_BG       = 'rgba(255,255,255,0.035)';
-const SUCCESS       = '#34C78A';
-const DANGER        = '#FF5252';
+const ACCENT = '#3B6FD4';
 
 type Concept        = { term: string; definition: string };
 type Flashcard      = { question: string; answer: string };
@@ -51,13 +47,10 @@ function fileIcon(name: string) {
 }
 
 function FlashCard({ card }: { card: Flashcard }) {
+  const styles = useStyles();
   const [flipped, setFlipped] = useState(false);
   return (
-    <TouchableOpacity
-      style={[styles.flashCard, flipped && styles.flashCardFlipped]}
-      onPress={() => setFlipped(!flipped)}
-      activeOpacity={0.85}
-    >
+    <TouchableOpacity style={[styles.flashCard, flipped && styles.flashCardFlipped]} onPress={() => setFlipped(!flipped)} activeOpacity={0.85}>
       <Text style={styles.flashCardHint}>{flipped ? 'Answer' : 'Question'}</Text>
       <Text style={styles.flashCardText}>{flipped ? card.answer : card.question}</Text>
       <Text style={styles.flashCardTap}>Tap to {flipped ? 'see question' : 'reveal answer'}</Text>
@@ -66,7 +59,11 @@ function FlashCard({ card }: { card: Flashcard }) {
 }
 
 function QuizCard({ item, index }: { item: QuizItem; index: number }) {
+  const styles = useStyles();
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
   const [selected, setSelected] = useState<number | null>(null);
+
   return (
     <View style={styles.quizCard}>
       <Text style={styles.quizQuestion}>{index + 1}. {item.question}</Text>
@@ -74,28 +71,28 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
         {item.options.map((opt, i) => {
           const isCorrect  = i === item.correctIndex;
           const isSelected = selected === i;
-          let bg = 'rgba(255,255,255,0.04)', border = 'rgba(255,255,255,0.08)', color = 'rgba(255,255,255,0.75)';
+          
+          let bg = isDark ? 'rgba(255,255,255,0.04)' : colors.background;
+          let border = colors.border;
+          let color = colors.text;
+
           if (selected !== null) {
-            if (isCorrect)       { bg = 'rgba(52,199,138,0.12)'; border = SUCCESS; color = SUCCESS; }
-            else if (isSelected) { bg = 'rgba(255,82,82,0.10)';  border = DANGER;  color = DANGER;  }
+            if (isCorrect)       { bg = colors.success + '20'; border = colors.success; color = colors.success; }
+            else if (isSelected) { bg = colors.danger + '20';  border = colors.danger;  color = colors.danger;  }
           }
           return (
-            <TouchableOpacity key={`opt-${i}`}
-              style={[styles.quizOption, { backgroundColor: bg, borderColor: border }]}
-              onPress={() => { if (selected === null) setSelected(i); }}
-              activeOpacity={0.8} disabled={selected !== null}
-            >
+            <TouchableOpacity key={`opt-${i}`} style={[styles.quizOption, { backgroundColor: bg, borderColor: border }]} onPress={() => { if (selected === null) setSelected(i); }} activeOpacity={0.8} disabled={selected !== null}>
               <Text style={[styles.quizOptionLetter, { color }]}>{String.fromCharCode(65 + i)}</Text>
               <Text style={[styles.quizOptionText, { color }]}>{opt}</Text>
-              {selected !== null && isCorrect    && <Feather name="check-circle" size={14} color={SUCCESS} />}
-              {selected !== null && isSelected && !isCorrect && <Feather name="x-circle" size={14} color={DANGER} />}
+              {selected !== null && isCorrect    && <Feather name="check-circle" size={14} color={colors.success} />}
+              {selected !== null && isSelected && !isCorrect && <Feather name="x-circle" size={14} color={colors.danger} />}
             </TouchableOpacity>
           );
         })}
       </View>
       {selected !== null && (
         <View style={styles.quizExplanation}>
-          <Feather name="info" size={12} color="rgba(255,255,255,0.35)" />
+          <Feather name="info" size={12} color={colors.textDim} />
           <Text style={styles.quizExplanationText}>{item.explanation}</Text>
         </View>
       )}
@@ -104,54 +101,42 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
 }
 
 export default function HistoryScreen() {
+  const styles = useStyles();
+  const { theme, colors } = useTheme();
+  const isDark = theme === 'dark';
+
   const [results, setResults]   = useState<OfflineLesson[]>([]);
   const [loading, setLoading]   = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
   
   const [studySession, setStudySession] = useState<OfflineLesson | null>(null);
   const [activeView, setActiveView]     = useState<ActiveView>(null);
-
-  // --- NEW: State for our custom delete modal ---
   const [deleteCandidate, setDeleteCandidate] = useState<{ id: string, fileName: string } | null>(null);
 
   useFocusEffect(
-    useCallback(() => {
-      loadOfflineHistory();
-    }, [])
+    useCallback(() => { loadOfflineHistory(); }, [])
   );
 
   const loadOfflineHistory = async () => {
     setLoading(true);
     try {
       const localData = await AsyncStorage.getItem('@studia_history');
-      if (localData) {
-        setResults(JSON.parse(localData));
-      } else {
-        setResults([]);
-      }
-    } catch (error) {
-      console.error("Failed to load offline history", error);
-    }
+      if (localData) setResults(JSON.parse(localData));
+      else setResults([]);
+    } catch (error) { console.error("Failed to load offline history", error); }
     setLoading(false);
   };
 
-  // Triggers the custom modal instead of native Alert
-  const handleDeleteClick = (id: string, fileName: string) => {
-    setDeleteCandidate({ id, fileName });
-  };
+  const handleDeleteClick = (id: string, fileName: string) => { setDeleteCandidate({ id, fileName }); };
 
-  // Executes the actual deletion
   const confirmDelete = async () => {
     if (!deleteCandidate) return;
     try {
       const updatedResults = results.filter(r => r.id !== deleteCandidate.id);
       setResults(updatedResults);
       await AsyncStorage.setItem('@studia_history', JSON.stringify(updatedResults));
-    } catch (error) {
-      console.error("Failed to delete lesson", error);
-    } finally {
-      setDeleteCandidate(null); // Hide modal
-    }
+    } catch (error) { console.error("Failed to delete lesson", error); } 
+    finally { setDeleteCandidate(null); }
   };
 
   const getOutputCards = () => {
@@ -171,7 +156,7 @@ export default function HistoryScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle={isDark ? "light-content" : "dark-content"} />
       <View style={styles.glow} />
       <SafeAreaView style={styles.safe}>
 
@@ -185,14 +170,10 @@ export default function HistoryScreen() {
         </View>
 
         {loading ? (
-          <View style={styles.center}>
-            <ActivityIndicator size="large" color={ACCENT} />
-          </View>
+          <View style={styles.center}><ActivityIndicator size="large" color={ACCENT} /></View>
         ) : results.length === 0 ? (
           <View style={styles.center}>
-            <View style={styles.emptyIcon}>
-              <Feather name="clock" size={32} color={ACCENT} />
-            </View>
+            <View style={styles.emptyIcon}><Feather name="clock" size={32} color={ACCENT} /></View>
             <Text style={styles.emptyTitle}>No history yet</Text>
             <Text style={styles.emptySub}>Your analyzed documents will appear here</Text>
           </View>
@@ -203,9 +184,7 @@ export default function HistoryScreen() {
               return (
                 <View key={item.id} style={styles.card}>
                   <TouchableOpacity style={styles.cardHeader} onPress={() => setExpanded(isOpen ? null : item.id)} activeOpacity={0.8}>
-                    <View style={styles.fileIconWrap}>
-                      <Feather name={fileIcon(item.fileName) as any} size={17} color={ACCENT} />
-                    </View>
+                    <View style={styles.fileIconWrap}><Feather name={fileIcon(item.fileName) as any} size={17} color={ACCENT} /></View>
                     <View style={styles.cardMeta}>
                       <Text style={styles.cardName} numberOfLines={1} ellipsizeMode="middle">{item.fileName}</Text>
                       <View style={styles.cardTagRow}>
@@ -214,7 +193,7 @@ export default function HistoryScreen() {
                         <Text style={styles.timeAgo}>{timeAgo(item.id)}</Text>
                       </View>
                     </View>
-                    <View style={styles.cardActions}><Feather name={isOpen ? 'chevron-up' : 'chevron-down'} size={16} color="rgba(255,255,255,0.3)" /></View>
+                    <View style={styles.cardActions}><Feather name={isOpen ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textDim} /></View>
                   </TouchableOpacity>
 
                   {isOpen && (
@@ -228,9 +207,8 @@ export default function HistoryScreen() {
                           <Feather name="play" size={14} color="#FFF" />
                           <Text style={styles.studyBtnText}>Study Now</Text>
                         </TouchableOpacity>
-                        {/* --- Trash Button Triggers Custom Modal --- */}
                         <TouchableOpacity style={styles.deleteBtn} onPress={() => handleDeleteClick(item.id, item.fileName)} activeOpacity={0.7}>
-                          <Feather name="trash-2" size={14} color="#FF5252" />
+                          <Feather name="trash-2" size={14} color={colors.danger} />
                         </TouchableOpacity>
                       </View>
                     </View>
@@ -242,16 +220,13 @@ export default function HistoryScreen() {
         )}
       </SafeAreaView>
 
-      {/* --- NEW CUSTOM DELETE CONFIRMATION MODAL --- */}
       <Modal visible={!!deleteCandidate} transparent animationType="fade" onRequestClose={() => setDeleteCandidate(null)}>
         <View style={styles.alertOverlay}>
           <View style={styles.alertBox}>
-            <View style={styles.alertIconWrap}>
-              <Feather name="trash-2" size={26} color={DANGER} />
-            </View>
+            <View style={styles.alertIconWrap}><Feather name="trash-2" size={26} color={colors.danger} /></View>
             <Text style={styles.alertTitle}>Delete File?</Text>
             <Text style={styles.alertDesc}>
-              Are you sure you want to remove <Text style={{ fontWeight: 'bold', color: '#FFF' }}>"{deleteCandidate?.fileName}"</Text> from your history? This action cannot be undone.
+              Are you sure you want to remove <Text style={{ fontWeight: 'bold', color: colors.text }}>"{deleteCandidate?.fileName}"</Text> from your history? This action cannot be undone.
             </Text>
             
             <View style={styles.alertRow}>
@@ -266,14 +241,13 @@ export default function HistoryScreen() {
         </View>
       </Modal>
 
-      {/* --- EXISTING FULL SCREEN STUDY MODAL --- */}
       <Modal visible={!!studySession} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setStudySession(null)}>
         <View style={styles.modalContainer}>
           <RNSafeAreaView style={{ flex: 1 }}>
             
             <View style={styles.modalHeader}>
               <TouchableOpacity onPress={() => activeView ? setActiveView(null) : setStudySession(null)} style={styles.modalBackBtn}>
-                <Feather name={activeView ? "arrow-left" : "x"} size={20} color="#FFF" />
+                <Feather name={activeView ? "arrow-left" : "x"} size={20} color={colors.text} />
               </TouchableOpacity>
               <View style={styles.modalTitleContainer}>
                 <Text style={styles.modalTitle} numberOfLines={1}>{activeView ? activeView.toUpperCase() : 'STUDY MENU'}</Text>
@@ -289,7 +263,7 @@ export default function HistoryScreen() {
                     <TouchableOpacity key={card.key} style={styles.outputCard} onPress={() => setActiveView(card.key)} activeOpacity={0.8}>
                       <View style={styles.outputCardTop}>
                         <View style={styles.outputIconWrap}><Feather name={card.icon as any} size={20} color={ACCENT} /></View>
-                        <Feather name="arrow-right" size={14} color="rgba(255,255,255,0.2)" />
+                        <Feather name="arrow-right" size={14} color={colors.textDim} />
                       </View>
                       <Text style={styles.outputCardLabel}>{card.label}</Text>
                       <Text style={styles.outputCardDesc}>{card.desc}</Text>
@@ -301,42 +275,12 @@ export default function HistoryScreen() {
                 </View>
               )}
 
-              {activeView === 'summary' && studySession && (
-                <View style={styles.summaryBox}><Text style={styles.summaryTextBody}>{studySession.content.summary}</Text></View>
-              )}
-              {activeView === 'concepts' && studySession && (
-                <View style={styles.conceptsList}>
-                  {studySession.content.keyConceptsList?.map((c, i) => (
-                    <View key={`concept-${i}`} style={styles.conceptItem}>
-                      <View style={styles.conceptDot} />
-                      <View style={styles.conceptContent}>
-                        <Text style={styles.conceptTerm}>{c.term}</Text>
-                        <Text style={styles.conceptDef}>{c.definition}</Text>
-                      </View>
-                    </View>
-                  ))}
-                </View>
-              )}
-              {activeView === 'flashcards' && studySession && (
-                <View style={styles.flashList}>
-                  {studySession.content.flashcards?.map((fc, i) => <FlashCard key={`flashcard-${i}`} card={fc} />)}
-                </View>
-              )}
-              {activeView === 'quiz' && studySession && (
-                <View style={styles.quizList}>
-                  {studySession.content.quiz?.map((q, i) => <QuizCard key={`quiz-${i}`} item={q} index={i} />)}
-                </View>
-              )}
-              {activeView === 'hardQuiz' && studySession && (
-                <View style={styles.quizList}>
-                  {studySession.content.hardQuiz?.map((q, i) => <QuizCard key={`hard-quiz-${i}`} item={q} index={i} />)}
-                </View>
-              )}
-              {activeView === 'exam' && studySession && (
-                <View style={styles.quizList}>
-                  {studySession.content.exam?.map((q, i) => <QuizCard key={`exam-q-${i}`} item={q} index={i} />)}
-                </View>
-              )}
+              {activeView === 'summary' && studySession && ( <View style={styles.summaryBox}><Text style={styles.summaryTextBody}>{studySession.content.summary}</Text></View> )}
+              {activeView === 'concepts' && studySession && ( <View style={styles.conceptsList}>{studySession.content.keyConceptsList?.map((c, i) => ( <View key={`concept-${i}`} style={styles.conceptItem}><View style={styles.conceptDot} /><View style={styles.conceptContent}><Text style={styles.conceptTerm}>{c.term}</Text><Text style={styles.conceptDef}>{c.definition}</Text></View></View> ))}</View> )}
+              {activeView === 'flashcards' && studySession && ( <View style={styles.flashList}>{studySession.content.flashcards?.map((fc, i) => <FlashCard key={`flashcard-${i}`} card={fc} />)}</View> )}
+              {activeView === 'quiz' && studySession && ( <View style={styles.quizList}>{studySession.content.quiz?.map((q, i) => <QuizCard key={`quiz-${i}`} item={q} index={i} />)}</View> )}
+              {activeView === 'hardQuiz' && studySession && ( <View style={styles.quizList}>{studySession.content.hardQuiz?.map((q, i) => <QuizCard key={`hard-quiz-${i}`} item={q} index={i} />)}</View> )}
+              {activeView === 'exam' && studySession && ( <View style={styles.quizList}>{studySession.content.exam?.map((q, i) => <QuizCard key={`exam-q-${i}`} item={q} index={i} />)}</View> )}
 
             </ScrollView>
           </RNSafeAreaView>
@@ -346,103 +290,102 @@ export default function HistoryScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container:   { flex: 1, backgroundColor: '#0C0D12' },
-  glow: { position: 'absolute', width: 480, height: 480, borderRadius: 240, backgroundColor: 'rgba(59,111,212,0.04)', top: -140, alignSelf: 'center' },
-  safe:        { flex: 1 },
+// --- NEW: DYNAMIC STYLES ---
+const useStyles = () => {
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
 
-  header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 8, flexDirection: 'row', alignItems: 'center', gap: 10 },
-  title: { fontSize: 19, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.4, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  countBadge: { backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10 },
-  countText: { fontSize: 11, fontWeight: '700', color: ACCENT, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  return StyleSheet.create({
+    container:   { flex: 1, backgroundColor: colors.background },
+    glow: { position: 'absolute', width: 480, height: 480, borderRadius: 240, backgroundColor: colors.accentDim, top: -140, alignSelf: 'center' },
+    safe:        { flex: 1 },
 
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
-  emptyIcon: { width: 72, height: 72, borderRadius: 36, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  emptyTitle: { fontSize: 17, fontWeight: '600', color: 'rgba(255,255,255,0.7)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  emptySub: { fontSize: 13, color: 'rgba(255,255,255,0.3)', textAlign: 'center', paddingHorizontal: 40, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 8, flexDirection: 'row', alignItems: 'center', gap: 10 },
+    title: { fontSize: 19, fontWeight: '700', color: colors.text, letterSpacing: -0.4, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    countBadge: { backgroundColor: colors.accentDim, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10 },
+    countText: { fontSize: 11, fontWeight: '700', color: colors.accent, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  list:        { flex: 1 },
-  listContent: { paddingHorizontal: 24, paddingTop: 8, paddingBottom: 40, gap: 12 },
+    center: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
+    emptyIcon: { width: 72, height: 72, borderRadius: 36, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+    emptyTitle: { fontSize: 17, fontWeight: '600', color: colors.text, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    emptySub: { fontSize: 13, color: colors.textDim, textAlign: 'center', paddingHorizontal: 40, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
 
-  card: { backgroundColor: CARD_BG, borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', overflow: 'hidden' },
-  cardHeader:  { flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 },
-  fileIconWrap: { width: 42, height: 42, borderRadius: 12, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  cardMeta:    { flex: 1, gap: 5 },
-  cardName: { fontSize: 14, fontWeight: '600', color: '#FFFFFF', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  cardTagRow:  { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  tag: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: ACCENT_DIM, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, borderWidth: 1, borderColor: ACCENT_BORDER },
-  tagText: { fontSize: 10, fontWeight: '500', color: ACCENT, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  timeAgo: { fontSize: 11, color: 'rgba(255,255,255,0.25)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  cardActions: { paddingLeft: 4 },
+    list:        { flex: 1 },
+    listContent: { paddingHorizontal: 24, paddingTop: 8, paddingBottom: 40, gap: 12 },
 
-  cardBody:    { paddingHorizontal: 14, paddingBottom: 16, gap: 10 },
-  divider:     { height: 1, backgroundColor: 'rgba(255,255,255,0.06)', marginBottom: 4 },
-  summaryLabel: { fontSize: 10, fontWeight: '600', color: ACCENT, letterSpacing: 1, textTransform: 'uppercase', marginBottom: -4, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  summaryText: { fontSize: 13, color: 'rgba(255,255,255,0.6)', lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  
-  actionRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
-  studyBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: ACCENT, paddingVertical: 10, borderRadius: 12 },
-  studyBtnText: { color: '#FFF', fontSize: 13, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  deleteBtn: { padding: 10, borderRadius: 12, backgroundColor: 'rgba(255,82,82,0.1)', borderWidth: 1, borderColor: 'rgba(255,82,82,0.2)' },
+    card: { backgroundColor: colors.cardBg, borderRadius: 18, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
+    cardHeader:  { flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 },
+    fileIconWrap: { width: 42, height: 42, borderRadius: 12, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+    cardMeta:    { flex: 1, gap: 5 },
+    cardName: { fontSize: 14, fontWeight: '600', color: colors.text, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    cardTagRow:  { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+    tag: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.accentDim, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border },
+    tagText: { fontSize: 10, fontWeight: '500', color: colors.accent, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    timeAgo: { fontSize: 11, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    cardActions: { paddingLeft: 4 },
 
-  // --- NEW ALERT MODAL STYLES ---
-  alertOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', padding: 24 },
-  alertBox: { width: '100%', backgroundColor: '#13141C', borderRadius: 24, padding: 24, alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,82,82,0.2)' },
-  alertIconWrap: { width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(255,82,82,0.1)', alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
-  alertTitle: { fontSize: 18, fontWeight: '700', color: '#FFFFFF', marginBottom: 8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  alertDesc: { fontSize: 13, color: 'rgba(255,255,255,0.5)', textAlign: 'center', lineHeight: 20, marginBottom: 24, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  alertRow: { flexDirection: 'row', gap: 12, width: '100%' },
-  alertCancelBtn: { flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.06)', alignItems: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
-  alertCancelText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  alertConfirmBtn: { flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: DANGER, alignItems: 'center' },
-  alertConfirmText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    cardBody:    { paddingHorizontal: 14, paddingBottom: 16, gap: 10 },
+    divider:     { height: 1, backgroundColor: colors.border, marginBottom: 4 },
+    summaryLabel: { fontSize: 10, fontWeight: '600', color: colors.accent, letterSpacing: 1, textTransform: 'uppercase', marginBottom: -4, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    summaryText: { fontSize: 13, color: colors.textDim, lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    
+    actionRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
+    studyBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: colors.accent, paddingVertical: 10, borderRadius: 12 },
+    studyBtnText: { color: '#FFF', fontSize: 13, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    deleteBtn: { padding: 10, borderRadius: 12, backgroundColor: colors.dangerDim, borderWidth: 1, borderColor: isDark ? 'rgba(255,82,82,0.2)' : colors.danger },
 
-  modalContainer: { flex: 1, backgroundColor: '#0C0D12' },
-  modalHeader: { 
-    flexDirection: 'row', 
-    alignItems: 'center', 
-    padding: 20, 
-    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) + 15 : 20, 
-    borderBottomWidth: 1, 
-    borderBottomColor: 'rgba(255,255,255,0.05)', 
-    backgroundColor: '#0C0D12' 
-  },
-  modalBackBtn: { padding: 5, marginRight: 15 },
-  modalTitleContainer: { flex: 1 },
-  modalTitle: { color: '#FFF', fontSize: 16, fontWeight: '700', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  modalSubTitle: { color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 2 },
-  modalScroll: { padding: 20, paddingBottom: 60 },
+    alertOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+    alertBox: { width: '100%', backgroundColor: colors.cardBg, borderRadius: 24, padding: 24, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
+    alertIconWrap: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.dangerDim, alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
+    alertTitle: { fontSize: 18, fontWeight: '700', color: colors.text, marginBottom: 8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    alertDesc: { fontSize: 13, color: colors.textDim, textAlign: 'center', lineHeight: 20, marginBottom: 24, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    alertRow: { flexDirection: 'row', gap: 12, width: '100%' },
+    alertCancelBtn: { flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : colors.background, alignItems: 'center', borderWidth: 1, borderColor: colors.border },
+    alertCancelText: { color: colors.text, fontSize: 14, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    alertConfirmBtn: { flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: colors.danger, alignItems: 'center' },
+    alertConfirmText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  outputGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  outputCard: { width: '48%', backgroundColor: CARD_BG, borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', padding: 16, gap: 6, marginBottom: 10 },
-  outputCardTop:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  outputIconWrap: { width: 40, height: 40, borderRadius: 12, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  outputCardLabel:{ fontSize: 15, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  outputCardDesc: { fontSize: 11, color: 'rgba(255,255,255,0.35)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  outputCardCount:{ alignSelf: 'flex-start', marginTop: 4, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
-  outputCardCountText: { fontSize: 10, fontWeight: '600', color: ACCENT, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    modalContainer: { flex: 1, backgroundColor: colors.background },
+    modalHeader: { flexDirection: 'row', alignItems: 'center', padding: 20, paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) + 15 : 20, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.background },
+    modalBackBtn: { padding: 5, marginRight: 15 },
+    modalTitleContainer: { flex: 1 },
+    modalTitle: { color: colors.text, fontSize: 16, fontWeight: '700', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    modalSubTitle: { color: colors.textDim, fontSize: 12, marginTop: 2 },
+    modalScroll: { padding: 20, paddingBottom: 60 },
 
-  summaryBox: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 18 },
-  summaryTextBody: { fontSize: 14, color: 'rgba(255,255,255,0.78)', lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  conceptsList: { gap: 10 },
-  conceptItem:  { flexDirection: 'row', gap: 12, backgroundColor: CARD_BG, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 14 },
-  conceptDot:   { width: 8, height: 8, borderRadius: 4, backgroundColor: ACCENT, marginTop: 5, flexShrink: 0 },
-  conceptContent: { flex: 1, gap: 4 },
-  conceptTerm:  { fontSize: 14, fontWeight: '600', color: '#FFFFFF', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  conceptDef:   { fontSize: 13, color: 'rgba(255,255,255,0.55)', lineHeight: 19, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  flashList: { gap: 12 },
-  flashCard: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: ACCENT_BORDER, padding: 20, gap: 10, alignItems: 'center', minHeight: 140, justifyContent: 'center' },
-  flashCardFlipped: { backgroundColor: 'rgba(59,111,212,0.08)' },
-  flashCardHint: { fontSize: 10, fontWeight: '600', color: ACCENT, letterSpacing: 1, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  flashCardText: { fontSize: 15, color: '#FFFFFF', textAlign: 'center', lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  flashCardTap:  { fontSize: 11, color: 'rgba(255,255,255,0.2)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  quizList: { gap: 14 },
-  quizCard: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 16, gap: 12 },
-  quizQuestion: { fontSize: 14, fontWeight: '600', color: '#FFFFFF', lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  quizOptions:  { gap: 8 },
-  quizOption:   { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 10, borderWidth: 1 },
-  quizOptionLetter: { fontSize: 12, fontWeight: '700', width: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 10, padding: 10 },
-  quizExplanationText: { fontSize: 12, color: 'rgba(255,255,255,0.45)', flex: 1, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-});
+    outputGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+    outputCard: { width: '48%', backgroundColor: colors.cardBg, borderRadius: 18, borderWidth: 1, borderColor: colors.border, padding: 16, gap: 6, marginBottom: 10 },
+    outputCardTop:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+    outputIconWrap: { width: 40, height: 40, borderRadius: 12, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, alignItems: 'center', justifyContent: 'center' },
+    outputCardLabel:{ fontSize: 15, fontWeight: '700', color: colors.text, letterSpacing: -0.2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    outputCardDesc: { fontSize: 11, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    outputCardCount:{ alignSelf: 'flex-start', marginTop: 4, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+    outputCardCountText: { fontSize: 10, fontWeight: '600', color: colors.accent, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+
+    summaryBox: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 18 },
+    summaryTextBody: { fontSize: 14, color: colors.text, lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    conceptsList: { gap: 10 },
+    conceptItem:  { flexDirection: 'row', gap: 12, backgroundColor: colors.cardBg, borderRadius: 14, borderWidth: 1, borderColor: colors.border, padding: 14 },
+    conceptDot:   { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent, marginTop: 5, flexShrink: 0 },
+    conceptContent: { flex: 1, gap: 4 },
+    conceptTerm:  { fontSize: 14, fontWeight: '600', color: colors.text, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    conceptDef:   { fontSize: 13, color: colors.textDim, lineHeight: 19, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    
+    flashList: { gap: 12 },
+    flashCard: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 20, gap: 10, alignItems: 'center', minHeight: 140, justifyContent: 'center' },
+    flashCardFlipped: { backgroundColor: colors.accentDim },
+    flashCardHint: { fontSize: 10, fontWeight: '600', color: colors.accent, letterSpacing: 1, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    flashCardText: { fontSize: 15, color: colors.text, textAlign: 'center', lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    flashCardTap:  { fontSize: 11, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    
+    quizList: { gap: 14 },
+    quizCard: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 16, gap: 12 },
+    quizQuestion: { fontSize: 14, fontWeight: '600', color: colors.text, lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    quizOptions:  { gap: 8 },
+    quizOption:   { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 10, borderWidth: 1 },
+    quizOptionLetter: { fontSize: 12, fontWeight: '700', width: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : colors.background, borderRadius: 10, padding: 10 },
+    quizExplanationText: { fontSize: 12, color: colors.textDim, flex: 1, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  });
+};

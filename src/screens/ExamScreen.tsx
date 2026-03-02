@@ -3,23 +3,22 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, StatusBar,
   Platform, Animated, Easing, ActivityIndicator, ScrollView, Dimensions,
-  Alert,
+  Alert, Image
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { decode } from 'base64-arraybuffer';
+import { useTheme } from '../context/ThemeContext';
+import LottieView from 'lottie-react-native'; // <-- Lottie Imported Here
 
-const ACCENT        = '#9B51E0'; // Purple accent to differentiate from the Blue Home screen
+const ACCENT        = '#9B51E0'; // Purple accent 
 const ACCENT_DIM    = 'rgba(155,81,224,0.10)';
 const ACCENT_BORDER = 'rgba(155,81,224,0.22)';
-const SUCCESS       = '#34C78A';
-const DANGER        = '#FF5252';
-const CARD_BG       = 'rgba(255,255,255,0.035)';
 const SW            = Dimensions.get('window').width;
 
 type PickedFile  = { name: string; uri: string; size: number; mimeType: string };
@@ -32,7 +31,6 @@ function formatBytes(b: number) {
   return `${(b / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// Helper to safely parse storage numbers
 const parseQuotaValue = (value: string | null): number => {
   if (value == null) return 0;
   const numeric = Number(value);
@@ -40,7 +38,11 @@ const parseQuotaValue = (value: string | null): number => {
 };
 
 function ExamCard({ item, index }: { item: ExamItem; index: number }) {
+  const styles = useStyles();
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
   const [selected, setSelected] = useState<number | null>(null);
+
   return (
     <View style={styles.quizCard}>
       <Text style={styles.quizQuestion}>{index + 1}. {item.question}</Text>
@@ -48,10 +50,14 @@ function ExamCard({ item, index }: { item: ExamItem; index: number }) {
         {item.options.map((opt, i) => {
           const isCorrect  = i === item.correctIndex;
           const isSelected = selected === i;
-          let bg = 'rgba(255,255,255,0.04)', border = 'rgba(255,255,255,0.08)', color = 'rgba(255,255,255,0.75)';
+          
+          let bg = isDark ? 'rgba(255,255,255,0.04)' : colors.background;
+          let border = colors.border;
+          let color = colors.text;
+
           if (selected !== null) {
-            if (isCorrect)       { bg = 'rgba(52,199,138,0.12)'; border = SUCCESS; color = SUCCESS; }
-            else if (isSelected) { bg = 'rgba(255,82,82,0.10)';  border = DANGER;  color = DANGER;  }
+            if (isCorrect)       { bg = colors.success + '20'; border = colors.success; color = colors.success; }
+            else if (isSelected) { bg = colors.danger + '20';  border = colors.danger;  color = colors.danger;  }
           }
           return (
             <TouchableOpacity key={`opt-${i}`}
@@ -61,15 +67,15 @@ function ExamCard({ item, index }: { item: ExamItem; index: number }) {
             >
               <Text style={[styles.quizOptionLetter, { color }]}>{String.fromCharCode(65 + i)}</Text>
               <Text style={[styles.quizOptionText, { color }]}>{opt}</Text>
-              {selected !== null && isCorrect    && <Feather name="check-circle" size={14} color={SUCCESS} />}
-              {selected !== null && isSelected && !isCorrect && <Feather name="x-circle" size={14} color={DANGER} />}
+              {selected !== null && isCorrect    && <Feather name="check-circle" size={14} color={colors.success} />}
+              {selected !== null && isSelected && !isCorrect && <Feather name="x-circle" size={14} color={colors.danger} />}
             </TouchableOpacity>
           );
         })}
       </View>
       {selected !== null && (
         <View style={styles.quizExplanation}>
-          <Feather name="info" size={12} color="rgba(255,255,255,0.35)" />
+          <Feather name="info" size={12} color={colors.textDim} />
           <Text style={styles.quizExplanationText}>{item.explanation}</Text>
         </View>
       )}
@@ -78,7 +84,10 @@ function ExamCard({ item, index }: { item: ExamItem; index: number }) {
 }
 
 export default function ExamScreen() {
+  const styles = useStyles(); 
+  const { theme, colors } = useTheme();
   const { user } = useAuth();
+  
   const [pickedFile,  setPickedFile]  = useState<PickedFile | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>('idle');
   const [errorMsg,    setErrorMsg]    = useState('');
@@ -87,43 +96,49 @@ export default function ExamScreen() {
   const cardScale    = useRef(new Animated.Value(1)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
   const doneAnim     = useRef(new Animated.Value(0)).current;
+  const glowAnim     = useRef(new Animated.Value(0)).current; // Glowing pulse animation
 
-  // --- NEW DAILY QUOTA SYSTEM ---
   const MAX_DAILY_EXAMS = 1;
   const [examQuotaUsed, setExamQuotaUsed] = useState(0);
+
+  const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
+  const examsLeft = Math.max(0, MAX_DAILY_EXAMS - examQuotaUsed);
+
+  // Trigger pulse animation when file is loaded
+  useEffect(() => {
+    if (pickedFile && !isWorking && uploadState !== 'done' && examsLeft > 0) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(glowAnim, { toValue: 1, duration: 1200, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+          Animated.timing(glowAnim, { toValue: 0, duration: 1200, easing: Easing.inOut(Easing.ease), useNativeDriver: true })
+        ])
+      ).start();
+    } else {
+      glowAnim.stopAnimation();
+    }
+  }, [pickedFile, isWorking, uploadState, examsLeft]);
 
   useEffect(() => {
     const loadDailyQuotas = async () => {
       if (!user) return;
-      
       const today = new Date().toLocaleDateString();
       try {
         const storedDate = await AsyncStorage.getItem(`@studia_date_${user.id}`);
-
         if (storedDate !== today) {
-          // It's a new day! Reset quotas to 0
           await AsyncStorage.setItem(`@studia_date_${user.id}`, today);
           await AsyncStorage.setItem(`@studia_upload_quota_${user.id}`, '0');
           await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, '0');
           setExamQuotaUsed(0);
         } else {
-          // Same day, load existing exam quota
           const eQuota = await AsyncStorage.getItem(`@studia_exam_quota_${user.id}`);
           setExamQuotaUsed(parseQuotaValue(eQuota));
         }
-      } catch (err) {
-        console.error("Error loading quotas", err);
-      }
+      } catch (err) { console.error("Error loading quotas", err); }
     };
     loadDailyQuotas();
   }, [user]);
 
-  // Determines if buttons should be disabled to prevent double-taps
-  const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
-
-  const animateProgress = (to: number) =>
-    Animated.timing(progressAnim, { toValue: to, duration: 400, easing: Easing.out(Easing.cubic), useNativeDriver: false }).start();
-
+  const animateProgress = (to: number) => Animated.timing(progressAnim, { toValue: to, duration: 400, easing: Easing.out(Easing.cubic), useNativeDriver: false }).start();
   const showDoneBanner = () => { doneAnim.setValue(0); Animated.spring(doneAnim, { toValue: 1, tension: 120, friction: 10, useNativeDriver: true }).start(); };
 
   const handlePick = async () => {
@@ -133,123 +148,73 @@ export default function ExamScreen() {
     });
     if (!res.canceled) {
       const asset = res.assets[0];
-
       if (asset.size && asset.size > 5 * 1024 * 1024) {
-        Alert.alert(
-          "File Too Large", 
-          "Please upload a document smaller than 5MB to ensure the AI can process it quickly."
-        );
+        Alert.alert("File Too Large", "Please upload a document smaller than 5MB to ensure the AI can process it quickly.");
         return; 
       }
-
       setPickedFile({ name: asset.name, uri: asset.uri, size: asset.size ?? 0, mimeType: asset.mimeType ?? 'application/octet-stream' });
-      setUploadState('idle');
-      setExamResult(null);
-      setErrorMsg('');
-      progressAnim.setValue(0);
+      setUploadState('idle'); setExamResult(null); setErrorMsg(''); progressAnim.setValue(0); doneAnim.setValue(0);
     }
   };
 
   const handleRemove = () => {
-    setPickedFile(null);
-    setUploadState('idle');
-    setExamResult(null);
-    setErrorMsg('');
-    progressAnim.setValue(0);
+    setPickedFile(null); setUploadState('idle'); setExamResult(null); setErrorMsg(''); progressAnim.setValue(0); doneAnim.setValue(0);
   };
 
   const handleGenerateExam = async () => {
     if (!pickedFile || !user) return;
-
-    // --- STOP THEM IF OUT OF EXAMS ---
     if (examQuotaUsed >= MAX_DAILY_EXAMS) {
-      Alert.alert(
-        "Daily Limit Reached", 
-        "You have used your 1 free exam generation for today. Please come back tomorrow!"
-      );
+      Alert.alert("Daily Limit Reached", "You have used your 1 free exam generation for today. Please come back tomorrow!");
       return; 
     }
 
     try {
-      setUploadState('uploading');
-      animateProgress(0.15);
-      
+      setUploadState('uploading'); animateProgress(0.15);
       const nameParts = pickedFile.name.split('.');
       const ext = nameParts.length > 1 ? nameParts[nameParts.length - 1] : null;
       const storagePath = ext ? `${user.id}/exams/${Date.now()}.${ext}` : `${user.id}/exams/${Date.now()}`;
       
       animateProgress(0.35);
-
-      // Safer Base64 decoding using base64-arraybuffer
       const base64Str = await FileSystem.readAsStringAsync(pickedFile.uri, { encoding: FileSystem.EncodingType.Base64 });
       const fileData = decode(base64Str);
       
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from('study-materials').upload(storagePath, fileData, { contentType: pickedFile.mimeType, upsert: false });
-        
+      const { data: uploadData, error: uploadError } = await supabase.storage.from('study-materials').upload(storagePath, fileData, { contentType: pickedFile.mimeType, upsert: false });
       if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
       
-      animateProgress(0.55);
-      setUploadState('analyzing');
-      animateProgress(0.75);
+      animateProgress(0.55); setUploadState('analyzing'); animateProgress(0.75);
       
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('No active session. Please log in again.');
       
       const { data: fnData, error: fnError } = await supabase.functions.invoke('generate-exam', {
-        body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id },
-        headers: { Authorization: `Bearer ${session.access_token}` },
+        body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id }, headers: { Authorization: `Bearer ${session.access_token}` },
       });
       
       if (fnError) throw new Error(`Generation failed: ${fnError.message}`);
       if (!fnData?.success || !fnData?.exam) throw new Error(fnData?.error ?? 'Failed to generate 50 items.');
       
-      animateProgress(1);
-      setExamResult(fnData.exam);
+      animateProgress(1); setExamResult(fnData.exam);
 
       try {
         const newLesson = {
           id: Date.now().toString(),
           fileName: `[EXAM] ${pickedFile.name}`,
           date: new Date().toLocaleDateString(),
-          content: {
-            summary: "50-Item Objective University Level Exam",
-            keyConceptsList: [],
-            flashcards: [],
-            quiz: [],
-            hardQuiz: fnData.exam 
-          }
+          content: { summary: "50-Item Objective University Level Exam", keyConceptsList: [], flashcards: [], quiz: [], hardQuiz: fnData.exam }
         };
         const existingHistory = await AsyncStorage.getItem('@studia_history');
-        
-        let historyArray = [];
-        if (existingHistory) {
-          try {
-             historyArray = JSON.parse(existingHistory);
-          } catch (e) {
-             console.error("Corrupted history JSON found, resetting.");
-          }
-        }
+        let historyArray = existingHistory ? JSON.parse(existingHistory) : [];
         historyArray.unshift(newLesson);
         await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
-      } catch (storageError) {
-        console.error("Offline save failed:", storageError);
-      }
+      } catch (storageError) { console.error("Offline save failed:", storageError); }
 
-      // --- DEDUCT EXAM QUOTA ---
-      if (user) {
-        const newQuota = examQuotaUsed + 1;
-        setExamQuotaUsed(newQuota);
-        await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, newQuota.toString());
-      }
-
-      setUploadState('done');
-      showDoneBanner();
+      const newQuota = examQuotaUsed + 1;
+      setExamQuotaUsed(newQuota);
+      await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, newQuota.toString());
+      setUploadState('done'); showDoneBanner();
 
     } catch (err: any) {
-      setUploadState('error');
-      console.error("Exam generation error:", err);
-      
+      setUploadState('error'); console.error("Exam generation error:", err);
       const structuredErrorType = err?.errorType ?? err?.code ?? null;
       const errorMessage = err?.message?.toLowerCase() || '';
 
@@ -271,11 +236,9 @@ export default function ExamScreen() {
     }
   };
 
-  const examsLeft = Math.max(0, MAX_DAILY_EXAMS - examQuotaUsed);
-
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle={theme === 'dark' ? "light-content" : "dark-content"} />
       <SafeAreaView style={styles.safe}>
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
@@ -287,12 +250,7 @@ export default function ExamScreen() {
           {!pickedFile && (
             <View>
               <Animated.View style={[styles.uploadCard, { transform: [{ scale: cardScale }] }]}>
-                <TouchableOpacity 
-                  style={[styles.uploadTouchable, isWorking && { opacity: 0.5 }]} 
-                  onPress={handlePick} 
-                  activeOpacity={1}
-                  disabled={isWorking}
-                >
+                <TouchableOpacity style={[styles.uploadTouchable, isWorking && { opacity: 0.5 }]} onPress={handlePick} activeOpacity={1} disabled={isWorking}>
                   <View style={styles.uploadCenter}>
                     <View style={styles.uploadIconOuter}>
                       <View style={styles.uploadIconInner}>
@@ -309,74 +267,95 @@ export default function ExamScreen() {
 
           {pickedFile && (
             <View style={styles.section}>
-              <View style={styles.attachCard}>
-                <View style={styles.fileRow}>
-                  <View style={styles.fileIconWrap}>
+              
+              {/* STATE 2A: The massive Lottie Working screen using loading.json */}
+              {isWorking && (
+                <View style={styles.workingContainer}>
+                  <LottieView source={require('../../assets/loading.json')} autoPlay loop style={{ width: 280, height: 280 }} />
+                  <Text style={styles.workingTitle}>
+                    {uploadState === 'uploading' ? 'Uploading Document...' : 'Generating Exam...'}
+                  </Text>
+                  <Text style={styles.workingSubtitle}>
+                    {uploadState === 'uploading' 
+                      ? `Securely sending ${pickedFile.name} to the cloud.` 
+                      : 'Drafting 50 challenging questions. This usually takes a minute.'}
+                  </Text>
+                  <View style={styles.largeProgressTrack}>
+                    <Animated.View style={[styles.largeProgressFill, { width: progressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]} />
+                  </View>
+                </View>
+              )}
+
+              {/* STATE 2B: The "Ready to Analyze" Redesigned Dock */}
+              {!isWorking && uploadState !== 'done' && (
+                 <View style={styles.readyContainer}>
+                    <View style={styles.readyFilePreview}>
+                      <View style={styles.readyFileIconWrap}>
+                        <Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={32} color={ACCENT} />
+                      </View>
+                      <Text style={styles.readyFileName} numberOfLines={1}>{pickedFile.name}</Text>
+                      <Text style={styles.readyFileSize}>{formatBytes(pickedFile.size)} • Ready for processing</Text>
+                    </View>
+
+                    {uploadState === 'error' && (
+                      <View style={styles.readyErrorBox}>
+                        <Feather name="alert-triangle" size={14} color={colors.danger} />
+                        <Text style={styles.readyErrorText}>{errorMsg}</Text>
+                      </View>
+                    )}
+
+                    <View style={styles.analyzeBtnWrapper}>
+                      <Animated.View style={[
+                        styles.analyzeBtnGlow,
+                        {
+                          transform: [{ scale: glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.05] }) }],
+                          opacity: glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] })
+                        }
+                      ]} />
+                      <TouchableOpacity 
+                        style={[styles.analyzeBtn, uploadState === 'error' && { backgroundColor: colors.danger }, examsLeft === 0 && { backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.1)' : colors.border }]} 
+                        onPress={handleGenerateExam} 
+                        activeOpacity={0.85}
+                        disabled={examsLeft === 0}
+                      >
+                         <Feather name={examsLeft === 0 ? 'lock' : uploadState === 'error' ? 'rotate-cw' : 'zap'} size={22} color={examsLeft === 0 ? colors.textDim : "#fff"} />
+                         <Text style={[styles.analyzeBtnText, examsLeft === 0 && { color: colors.textDim }]}>
+                           {examsLeft === 0 ? 'Daily Limit Reached' : uploadState === 'error' ? 'Retry Generation' : `Generate Exam (${examsLeft} left)`}
+                         </Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <TouchableOpacity style={styles.changeFileBtn} onPress={handlePick}>
+                      <Feather name="refresh-ccw" size={14} color={colors.textDim} />
+                      <Text style={styles.changeFileText}>Select a different file</Text>
+                    </TouchableOpacity>
+                 </View>
+              )}
+
+              {/* STATE 2C: Done Compact Header */}
+              {uploadState === 'done' && (
+                <View style={styles.doneCompactCard}>
+                  <View style={styles.doneCompactIcon}>
                     <Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={20} color={ACCENT} />
                   </View>
-                  <View style={styles.fileMeta}>
-                    <Text style={styles.fileName} numberOfLines={1}>{pickedFile.name}</Text>
-                    <Text style={styles.fileSize}>{formatBytes(pickedFile.size)}</Text>
+                  <View style={styles.doneCompactMeta}>
+                    <Text style={styles.doneCompactName} numberOfLines={1}>{pickedFile.name}</Text>
+                    <Text style={styles.doneCompactSize}>{formatBytes(pickedFile.size)}</Text>
                   </View>
-                  {!isWorking && uploadState !== 'done' && (
-                    <TouchableOpacity style={styles.removeBtn} onPress={handleRemove} hitSlop={{ top:8, bottom:8, left:8, right:8 }}>
-                      <Feather name="x" size={14} color="rgba(255,255,255,0.35)" />
-                    </TouchableOpacity>
-                  )}
-                </View>
-
-                {(isWorking || uploadState === 'done') && (
-                  <View style={styles.progressTrack}>
-                    <Animated.View style={[styles.progressFill, { width: progressAnim.interpolate({ inputRange: [0,1], outputRange: ['0%','100%'] }) }]} />
-                  </View>
-                )}
-
-                {isWorking && (
-                  <View style={styles.statusRow}>
-                    <ActivityIndicator size="small" color={ACCENT} />
-                    <Text style={styles.statusText}>{uploadState === 'uploading' ? 'Uploading...' : 'Drafting 50-item exam. This may take a minute...'}</Text>
-                  </View>
-                )}
-
-                {uploadState === 'error' && (
-                  <View style={styles.errorRow}>
-                    <Feather name="alert-circle" size={13} color={DANGER} />
-                    <Text style={styles.errorText}>{errorMsg}</Text>
-                  </View>
-                )}
-
-                {!isWorking && uploadState !== 'done' && (
-                  <TouchableOpacity 
-                    style={[
-                      styles.primaryBtn, 
-                      uploadState === 'error' && { backgroundColor: '#C0392B' },
-                      examsLeft === 0 && { backgroundColor: 'rgba(255,255,255,0.1)' }
-                    ]} 
-                    onPress={handleGenerateExam}
-                    disabled={isWorking || examsLeft === 0}
-                  >
-                    <Feather name={examsLeft === 0 ? 'lock' : uploadState === 'error' ? 'rotate-cw' : 'zap'} size={15} color={examsLeft === 0 ? "rgba(255,255,255,0.4)" : "#fff"} />
-                    <Text style={[styles.primaryBtnText, examsLeft === 0 && { color: 'rgba(255,255,255,0.4)' }]}>
-                      {examsLeft === 0 ? 'Daily Limit Reached' : uploadState === 'error' ? 'Retry Exam Generation' : `Generate 50 Items (${examsLeft} left)`}
-                    </Text>
+                  <TouchableOpacity style={styles.newUploadBtn} onPress={handleRemove} activeOpacity={0.7}>
+                    <Feather name="trash-2" size={16} color={colors.textDim} />
                   </TouchableOpacity>
-                )}
-              </View>
+                </View>
+              )}
             </View>
           )}
 
           {examResult && uploadState === 'done' && (
             <View style={{ gap: 14, paddingHorizontal: 24, marginTop: 20 }}>
-              {/* --- NEW ANIMATED BANNER --- */}
-              <Animated.View style={{
-                opacity: doneAnim,
-                transform: [{ translateY: doneAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) }]
-              }}>
+              <Animated.View style={{ opacity: doneAnim, transform: [{ translateY: doneAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) }] }}>
                 <View style={styles.doneBanner}>
                   <View style={styles.doneBannerLeft}>
-                    <View style={styles.doneIconWrap}>
-                      <Feather name="check" size={18} color={SUCCESS} />
-                    </View>
+                    <View style={styles.doneIconWrap}><Feather name="check" size={18} color={colors.success} /></View>
                     <View>
                       <Text style={styles.doneBannerTitle}>Exam Generated!</Text>
                       <Text style={styles.doneBannerSub}>Good luck on your 50-item test.</Text>
@@ -402,64 +381,76 @@ export default function ExamScreen() {
   );
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────────
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0C0D12' },
-  safe:   { flex: 1 },
-  scroll: { flexGrow: 1, paddingBottom: 56 },
+// --- NEW: DYNAMIC STYLES ---
+const useStyles = () => {
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
 
-  header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 16 },
-  title: { fontSize: 24, fontWeight: '800', color: '#FFFFFF', letterSpacing: -0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  subtitle: { fontSize: 13, color: ACCENT, fontWeight: '600', marginTop: 4, textTransform: 'uppercase', letterSpacing: 1 },
+  return StyleSheet.create({
+    container: { flex: 1, backgroundColor: colors.background },
+    safe:   { flex: 1 },
+    scroll: { flexGrow: 1, paddingBottom: 56 },
 
-  /* --- NEW PRO TIP STYLES FOR EXAM SCREEN --- */
-  tipBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(155,81,224,0.08)', borderWidth: 1, borderColor: 'rgba(155,81,224,0.15)', borderRadius: 12, padding: 12, marginHorizontal: 24, marginTop: 16, gap: 10 },
-  tipIconWrap: { width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(155,81,224,0.15)', alignItems: 'center', justifyContent: 'center' },
-  tipText: { flex: 1, fontSize: 12, color: 'rgba(255,255,255,0.6)', lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 16 },
+    title: { fontSize: 24, fontWeight: '800', color: colors.text, letterSpacing: -0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    subtitle: { fontSize: 13, color: ACCENT, fontWeight: '600', marginTop: 4, textTransform: 'uppercase', letterSpacing: 1 },
 
-  uploadCard: { marginHorizontal: 24, marginTop: 10, height: SW * 0.60, borderRadius: 24, backgroundColor: 'rgba(155,81,224,0.05)', borderWidth: 1.5, borderColor: ACCENT_BORDER, borderStyle: 'dashed', overflow: 'hidden' },
-  uploadTouchable: { flex: 1 },
-  uploadCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
-  uploadIconOuter: { width: 100, height: 100, borderRadius: 50, backgroundColor: 'rgba(155,81,224,0.08)', borderWidth: 1, borderColor: 'rgba(155,81,224,0.15)', alignItems: 'center', justifyContent: 'center' },
-  uploadIconInner: { width: 72, height: 72, borderRadius: 36, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  uploadTitle: { fontSize: 18, fontWeight: '600', color: 'rgba(255,255,255,0.75)' },
-  uploadSubtitle: { fontSize: 12, color: 'rgba(255,255,255,0.3)' },
+    uploadCard: { marginHorizontal: 24, marginTop: 10, height: SW * 0.60, borderRadius: 24, backgroundColor: isDark ? 'rgba(155,81,224,0.05)' : colors.cardBg, borderWidth: 1.5, borderColor: isDark ? ACCENT_BORDER : colors.border, borderStyle: 'dashed', overflow: 'hidden' },
+    uploadTouchable: { flex: 1 },
+    uploadCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
+    uploadIconOuter: { width: 100, height: 100, borderRadius: 50, backgroundColor: isDark ? 'rgba(155,81,224,0.08)' : colors.background, borderWidth: 1, borderColor: isDark ? 'rgba(155,81,224,0.15)' : colors.border, alignItems: 'center', justifyContent: 'center' },
+    uploadIconInner: { width: 72, height: 72, borderRadius: 36, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: isDark ? ACCENT_BORDER : colors.border, alignItems: 'center', justifyContent: 'center' },
+    uploadTitle: { fontSize: 18, fontWeight: '600', color: colors.text },
+    uploadSubtitle: { fontSize: 12, color: colors.textDim },
 
-  section:     { paddingHorizontal: 24, marginTop: 10, gap: 14 },
-  attachCard:  { backgroundColor: CARD_BG, borderRadius: 20, borderWidth: 1, borderColor: ACCENT_BORDER, padding: 16, gap: 14 },
-  fileRow:     { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  fileIconWrap:{ width: 46, height: 46, borderRadius: 13, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  fileMeta:    { flex: 1, gap: 3 },
-  fileName:    { fontSize: 14, fontWeight: '600', color: '#FFFFFF' },
-  fileSize:    { fontSize: 11, color: 'rgba(255,255,255,0.32)' },
-  removeBtn:   { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.06)', alignItems: 'center', justifyContent: 'center' },
-  
-  progressTrack: { height: 3, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.07)', overflow: 'hidden' },
-  progressFill:  { height: 3, borderRadius: 2, backgroundColor: ACCENT },
-  statusRow:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  statusText:  { fontSize: 12, color: 'rgba(255,255,255,0.45)' },
-  errorRow:    { flexDirection: 'row', alignItems: 'flex-start', gap: 7 },
-  errorText:   { fontSize: 12, color: DANGER, flex: 1, lineHeight: 17 },
-  
-  primaryBtn:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingVertical: 13, borderRadius: 12, backgroundColor: ACCENT },
-  primaryBtnText: { fontSize: 14, fontWeight: '600', color: '#FFFFFF' },
+    section: { paddingHorizontal: 24, marginTop: 10, gap: 14 },
 
-  contentSection: { paddingHorizontal: 24, marginTop: 20, gap: 12 },
-  contentHeader:  { paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' },
-  contentTitle: { fontSize: 18, fontWeight: '700', color: '#FFFFFF' },
+    readyContainer: { backgroundColor: colors.cardBg, borderRadius: 24, borderWidth: 1, borderColor: colors.border, padding: 30, alignItems: 'center', gap: 20 },
+    readyFilePreview: { alignItems: 'center', gap: 8, marginBottom: 6 },
+    readyFileIconWrap: { width: 72, height: 72, borderRadius: 20, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: isDark ? ACCENT_BORDER : colors.border, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+    readyFileName: { fontSize: 18, fontWeight: '700', color: colors.text, textAlign: 'center', paddingHorizontal: 10, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-bold' }) },
+    readyFileSize: { fontSize: 13, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    readyErrorBox: { flexDirection: 'row', backgroundColor: colors.dangerDim, borderWidth: 1, borderColor: isDark ? 'rgba(255,82,82,0.2)' : colors.danger, padding: 12, borderRadius: 12, gap: 8, width: '100%' },
+    readyErrorText: { color: colors.danger, fontSize: 12, flex: 1, lineHeight: 18 },
+    
+    analyzeBtnWrapper: { width: '100%', position: 'relative', marginTop: 10 },
+    analyzeBtnGlow: { ...StyleSheet.absoluteFillObject, backgroundColor: ACCENT, borderRadius: 20 },
+    analyzeBtn: { backgroundColor: ACCENT, borderRadius: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 18, gap: 12 },
+    analyzeBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', letterSpacing: 0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-bold' }) },
+    
+    changeFileBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 },
+    changeFileText: { color: colors.textDim, fontSize: 13, fontWeight: '500', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  quizList: { gap: 14 },
-  quizCard: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 16, gap: 12 },
-  quizQuestion: { fontSize: 14, fontWeight: '600', color: '#FFFFFF', lineHeight: 20 },
-  quizOptions:  { gap: 8 },
-  quizOption:   { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 10, borderWidth: 1 },
-  quizOptionLetter: { fontSize: 12, fontWeight: '700', width: 18 },
-  quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18 },
-  quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 10, padding: 10 },
-  quizExplanationText: { fontSize: 12, color: 'rgba(255,255,255,0.45)', flex: 1, lineHeight: 17 },
-  doneBanner: { backgroundColor: 'rgba(52,199,138,0.08)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(52,199,138,0.2)', padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  doneBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  doneIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: 'rgba(52,199,138,0.12)', alignItems: 'center', justifyContent: 'center' },
-  doneBannerTitle: { fontSize: 14, fontWeight: '600', color: SUCCESS, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  doneBannerSub:   { fontSize: 11, color: 'rgba(52,199,138,0.6)', marginTop: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-});
+    doneCompactCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.cardBg, borderRadius: 18, borderWidth: 1, borderColor: colors.border, padding: 14, gap: 14 },
+    doneCompactIcon: { width: 44, height: 44, borderRadius: 12, backgroundColor: ACCENT_DIM, alignItems: 'center', justifyContent: 'center' },
+    doneCompactMeta: { flex: 1 },
+    doneCompactName: { color: colors.text, fontSize: 15, fontWeight: '600', marginBottom: 2 },
+    doneCompactSize: { color: colors.textDim, fontSize: 11 },
+    newUploadBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : colors.background, alignItems: 'center', justifyContent: 'center' },
+
+    workingContainer: { alignItems: 'center', justifyContent: 'center', paddingVertical: 40, backgroundColor: colors.cardBg, borderRadius: 24, borderWidth: 1, borderColor: colors.border },
+    workingTitle: { fontSize: 20, fontWeight: '700', color: colors.text, marginTop: 10, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-bold' }) },
+    workingSubtitle: { fontSize: 13, color: colors.textDim, textAlign: 'center', paddingHorizontal: 30, marginTop: 8, lineHeight: 20 },
+    largeProgressTrack: { width: '80%', height: 6, borderRadius: 3, backgroundColor: colors.border, marginTop: 24, overflow: 'hidden' },
+    largeProgressFill: { height: '100%', backgroundColor: ACCENT, borderRadius: 3 },
+    
+    contentSection: { paddingHorizontal: 24, marginTop: 20, gap: 12 },
+    contentHeader:  { paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
+    contentTitle: { fontSize: 18, fontWeight: '700', color: colors.text },
+
+    quizList: { gap: 14 },
+    quizCard: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 16, gap: 12 },
+    quizQuestion: { fontSize: 14, fontWeight: '600', color: colors.text, lineHeight: 20 },
+    quizOptions:  { gap: 8 },
+    quizOption:   { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 10, borderWidth: 1 },
+    quizOptionLetter: { fontSize: 12, fontWeight: '700', width: 18 },
+    quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18 },
+    quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : colors.background, borderRadius: 10, padding: 10 },
+    quizExplanationText: { fontSize: 12, color: colors.textDim, flex: 1, lineHeight: 17 },
+    doneBanner: { backgroundColor: isDark ? 'rgba(52,199,138,0.08)' : '#ECFDF5', borderRadius: 16, borderWidth: 1, borderColor: isDark ? 'rgba(52,199,138,0.2)' : '#D1FAE5', padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    doneBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+    doneIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: isDark ? 'rgba(52,199,138,0.12)' : '#D1FAE5', alignItems: 'center', justifyContent: 'center' },
+    doneBannerTitle: { fontSize: 14, fontWeight: '600', color: colors.success, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    doneBannerSub:   { fontSize: 11, color: isDark ? 'rgba(52,199,138,0.6)' : '#059669', marginTop: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  });
+};

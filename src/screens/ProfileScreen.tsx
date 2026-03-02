@@ -9,21 +9,16 @@ import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
+import { useTheme } from '../context/ThemeContext'; // <-- NEW IMPORT
 
 const ACCENT        = '#3B6FD4';
-const ACCENT_DIM    = 'rgba(59,111,212,0.10)';
-const ACCENT_BORDER = 'rgba(59,111,212,0.22)';
-const CARD_BG       = 'rgba(255,255,255,0.035)';
-const SUCCESS       = '#34C78A';
 
 export default function ProfileScreen() {
+  const styles = useStyles(); // <-- NEW: Dynamic Styles
+  const { theme, colors } = useTheme();
   const { profile, user } = useAuth();
-  const [stats, setStats] = useState({
-    totalDocs: 0,
-    totalFlashcards: 0,
-    totalQuizzes: 0,
-    totalConcepts: 0,
-  });
+  
+  const [stats, setStats] = useState({ totalDocs: 0, totalFlashcards: 0, totalQuizzes: 0, totalConcepts: 0 });
   const [loading, setLoading] = useState(true);
   const [greeting, setGreeting] = useState('Welcome back');
 
@@ -37,7 +32,6 @@ export default function ProfileScreen() {
       if (hour < 12) setGreeting('Good morning');
       else if (hour < 18) setGreeting('Good afternoon');
       else setGreeting('Good evening');
-
       fetchOfflineStats();
     }, [])
   );
@@ -48,26 +42,16 @@ export default function ProfileScreen() {
       if (localData) {
         const history = JSON.parse(localData);
         let fCount = 0; let qCount = 0; let cCount = 0;
-
         history.forEach((item: any) => {
           fCount += item.content?.flashcards?.length || 0;
           qCount += (item.content?.quiz?.length || 0) + (item.content?.hardQuiz?.length || 0);
           cCount += item.content?.keyConceptsList?.length || 0;
         });
-
-        setStats({
-          totalDocs: history.length,
-          totalFlashcards: fCount,
-          totalQuizzes: qCount,
-          totalConcepts: cCount,
-        });
+        setStats({ totalDocs: history.length, totalFlashcards: fCount, totalQuizzes: qCount, totalConcepts: cCount });
       } else {
-        // Reset stats if data was cleared
         setStats({ totalDocs: 0, totalFlashcards: 0, totalQuizzes: 0, totalConcepts: 0 });
       }
-    } catch (error) {
-      console.error("Failed to fetch profile stats:", error);
-    }
+    } catch (error) { console.error("Failed to fetch profile stats:", error); }
     setLoading(false);
   };
 
@@ -84,15 +68,12 @@ export default function ProfileScreen() {
   ];
 
   const handleBadgeTap = (badge: any) => {
-    Alert.alert(
-      badge.unlocked ? `Unlocked: ${badge.label}` : `Locked: ${badge.label}`,
-      badge.desc
-    );
+    Alert.alert(badge.unlocked ? `Unlocked: ${badge.label}` : `Locked: ${badge.label}`, badge.desc);
   };
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle={theme === 'dark' ? "light-content" : "dark-content"} />
       <View style={styles.glow} />
 
       <SafeAreaView style={styles.safe}>
@@ -106,9 +87,7 @@ export default function ProfileScreen() {
           <View style={styles.avatarCard}>
             <View style={styles.avatarRing}>
               <Text style={styles.avatarText}>{initials}</Text>
-              <View style={styles.levelBadge}>
-                <Text style={styles.levelText}>Lvl {currentLevel}</Text>
-              </View>
+              <View style={styles.levelBadge}><Text style={styles.levelText}>Lvl {currentLevel}</Text></View>
             </View>
             
             <Text style={styles.fullName}>{fullName}</Text>
@@ -133,9 +112,7 @@ export default function ProfileScreen() {
             <View style={styles.statsGrid}>
               {statItems.map((item, i) => (
                 <View key={i} style={styles.statCard}>
-                  <View style={styles.statIconWrap}>
-                    <Feather name={item.icon as any} size={16} color={ACCENT} />
-                  </View>
+                  <View style={styles.statIconWrap}><Feather name={item.icon as any} size={16} color={ACCENT} /></View>
                   <Text style={styles.statValue}>{item.value}</Text>
                   <Text style={styles.statLabel}>{item.label}</Text>
                 </View>
@@ -153,14 +130,8 @@ export default function ProfileScreen() {
               { icon: 'award',        label: '50 flashcards',  desc: 'Become a memory master by generating 50 flashcards.', unlocked: stats.totalFlashcards >= 50 },
             ].map((badge, i) => (
               <TouchableOpacity key={i} onPress={() => handleBadgeTap(badge)} activeOpacity={0.7} style={[styles.badge, !badge.unlocked && styles.badgeLocked]}>
-                <Feather
-                  name={badge.icon as any}
-                  size={24}
-                  color={badge.unlocked ? ACCENT : 'rgba(255,255,255,0.15)'}
-                />
-                <Text style={[styles.badgeLabel, !badge.unlocked && styles.badgeLabelLocked]}>
-                  {badge.label}
-                </Text>
+                <Feather name={badge.icon as any} size={24} color={badge.unlocked ? ACCENT : colors.textDim} />
+                <Text style={[styles.badgeLabel, !badge.unlocked && styles.badgeLabelLocked]}>{badge.label}</Text>
                 {badge.unlocked && <View style={styles.unlockedDot} />}
               </TouchableOpacity>
             ))}
@@ -199,52 +170,58 @@ export default function ProfileScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container:   { flex: 1, backgroundColor: '#0C0D12' },
-  glow: { position: 'absolute', width: 480, height: 480, borderRadius: 240, backgroundColor: 'rgba(59,111,212,0.04)', top: -140, alignSelf: 'center' },
-  safe:        { flex: 1 },
-  scroll:      { paddingBottom: 48 },
+// --- NEW: DYNAMIC STYLES ---
+const useStyles = () => {
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
 
-  header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 4 },
-  greetingText: { fontSize: 13, color: 'rgba(255,255,255,0.5)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }), marginBottom: 2 },
-  title: { fontSize: 24, fontWeight: '800', color: '#FFFFFF', letterSpacing: -0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+  return StyleSheet.create({
+    container:   { flex: 1, backgroundColor: colors.background },
+    glow: { position: 'absolute', width: 480, height: 480, borderRadius: 240, backgroundColor: colors.accentDim, top: -140, alignSelf: 'center' },
+    safe:        { flex: 1 },
+    scroll:      { paddingBottom: 48 },
 
-  avatarCard: { margin: 24, marginTop: 16, backgroundColor: CARD_BG, borderRadius: 24, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', alignItems: 'center', paddingTop: 28, paddingBottom: 24, gap: 6 },
-  avatarRing: { width: 84, height: 84, borderRadius: 42, backgroundColor: ACCENT_DIM, borderWidth: 2, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
-  avatarText: { fontSize: 28, fontWeight: '700', color: ACCENT, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  levelBadge: { position: 'absolute', bottom: -8, backgroundColor: ACCENT, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 2, borderColor: '#181C25' },
-  levelText: { color: '#FFF', fontSize: 10, fontWeight: '800', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  
-  fullName: { fontSize: 18, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }), marginTop: 6 },
-  studentId: { fontSize: 13, color: 'rgba(255,255,255,0.5)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }), marginBottom: 12 },
+    header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 4 },
+    greetingText: { fontSize: 13, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }), marginBottom: 2 },
+    title: { fontSize: 24, fontWeight: '800', color: colors.text, letterSpacing: -0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
 
-  progressContainer: { width: '85%', marginTop: 10 },
-  progressHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
-  progressLabel: { fontSize: 11, fontWeight: '600', color: 'rgba(255,255,255,0.4)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  progressTrack: { height: 6, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' },
-  progressFill: { height: '100%', backgroundColor: SUCCESS, borderRadius: 3 },
-  xpRemainingText: { fontSize: 10, color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginTop: 8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    avatarCard: { margin: 24, marginTop: 16, backgroundColor: colors.cardBg, borderRadius: 24, borderWidth: 1, borderColor: colors.border, alignItems: 'center', paddingTop: 28, paddingBottom: 24, gap: 6 },
+    avatarRing: { width: 84, height: 84, borderRadius: 42, backgroundColor: colors.accentDim, borderWidth: 2, borderColor: colors.accent, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+    avatarText: { fontSize: 28, fontWeight: '700', color: colors.accent, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    levelBadge: { position: 'absolute', bottom: -8, backgroundColor: colors.accent, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 2, borderColor: colors.cardBg },
+    levelText: { color: '#FFF', fontSize: 10, fontWeight: '800', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    
+    fullName: { fontSize: 18, fontWeight: '700', color: colors.text, letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }), marginTop: 6 },
+    studentId: { fontSize: 13, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }), marginBottom: 12 },
 
-  sectionLabel: { fontSize: 10, fontWeight: '600', color: 'rgba(255,255,255,0.28)', letterSpacing: 1.2, textTransform: 'uppercase', marginLeft: 24, marginBottom: 10, marginTop: 4, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    progressContainer: { width: '85%', marginTop: 10 },
+    progressHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+    progressLabel: { fontSize: 11, fontWeight: '600', color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    progressTrack: { height: 6, backgroundColor: colors.border, borderRadius: 3, overflow: 'hidden' },
+    progressFill: { height: '100%', backgroundColor: colors.success, borderRadius: 3 },
+    xpRemainingText: { fontSize: 10, color: colors.textDim, textAlign: 'center', marginTop: 8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
 
-  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 24, gap: 10, marginBottom: 24 },
-  statCard: { flex: 1, minWidth: '44%', backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 16, alignItems: 'flex-start', gap: 8 },
-  statIconWrap: { width: 34, height: 34, borderRadius: 10, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  statValue: { fontSize: 26, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  statLabel: { fontSize: 11, color: 'rgba(255,255,255,0.4)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    sectionLabel: { fontSize: 10, fontWeight: '600', color: colors.textDim, letterSpacing: 1.2, textTransform: 'uppercase', marginLeft: 24, marginBottom: 10, marginTop: 4, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  infoCard: { marginHorizontal: 24, marginBottom: 24, backgroundColor: CARD_BG, borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', overflow: 'hidden' },
-  infoRow: { flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 },
-  infoIconWrap: { width: 34, height: 34, borderRadius: 10, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  infoContent: { flex: 1, gap: 2 },
-  infoLabel: { fontSize: 10, fontWeight: '600', color: 'rgba(255,255,255,0.28)', letterSpacing: 0.8, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  infoValue: { fontSize: 14, color: 'rgba(255,255,255,0.8)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  infoDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.05)', marginLeft: 60 },
+    statsGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 24, gap: 10, marginBottom: 24 },
+    statCard: { flex: 1, minWidth: '44%', backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 16, alignItems: 'flex-start', gap: 8 },
+    statIconWrap: { width: 34, height: 34, borderRadius: 10, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, alignItems: 'center', justifyContent: 'center' },
+    statValue: { fontSize: 26, fontWeight: '700', color: colors.text, letterSpacing: -0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    statLabel: { fontSize: 11, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
 
-  badgeScroll: { paddingLeft: 24, marginBottom: 24 },
-  badge: { width: 100, alignItems: 'center', gap: 10, backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: ACCENT_BORDER, padding: 16, marginRight: 10 },
-  badgeLocked: { borderColor: 'rgba(255,255,255,0.06)', backgroundColor: 'rgba(255,255,255,0.02)' },
-  badgeLabel: { fontSize: 11, fontWeight: '600', color: '#FFFFFF', textAlign: 'center', lineHeight: 14, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  badgeLabelLocked: { color: 'rgba(255,255,255,0.3)', fontWeight: '500' },
-  unlockedDot: { position: 'absolute', top: 8, right: 8, width: 8, height: 8, borderRadius: 4, backgroundColor: SUCCESS },
-});
+    infoCard: { marginHorizontal: 24, marginBottom: 24, backgroundColor: colors.cardBg, borderRadius: 18, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
+    infoRow: { flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 },
+    infoIconWrap: { width: 34, height: 34, borderRadius: 10, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, alignItems: 'center', justifyContent: 'center' },
+    infoContent: { flex: 1, gap: 2 },
+    infoLabel: { fontSize: 10, fontWeight: '600', color: colors.textDim, letterSpacing: 0.8, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    infoValue: { fontSize: 14, color: colors.text, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    infoDivider: { height: 1, backgroundColor: colors.border, marginLeft: 60 },
+
+    badgeScroll: { paddingLeft: 24, marginBottom: 24 },
+    badge: { width: 100, alignItems: 'center', gap: 10, backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 16, marginRight: 10 },
+    badgeLocked: { borderColor: colors.border, backgroundColor: isDark ? 'rgba(255,255,255,0.02)' : colors.background },
+    badgeLabel: { fontSize: 11, fontWeight: '600', color: colors.text, textAlign: 'center', lineHeight: 14, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    badgeLabelLocked: { color: colors.textDim, fontWeight: '500' },
+    unlockedDot: { position: 'absolute', top: 8, right: 8, width: 8, height: 8, borderRadius: 4, backgroundColor: colors.success },
+  });
+};

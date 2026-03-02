@@ -10,13 +10,13 @@ import { Feather } from '@expo/vector-icons';
 import { Platform, View } from 'react-native';
 
 import { AuthProvider, useAuth } from './src/context/AuthContext';
+import { ThemeProvider, useTheme } from './src/context/ThemeContext';
 import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import HistoryScreen from './src/screens/HistoryScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 
-const ACCENT = '#3B6FD4';
 const Stack = createNativeStackNavigator();
 const Tab   = createBottomTabNavigator();
 
@@ -28,23 +28,28 @@ const tabIcons: Record<string, string> = {
 };
 
 function DashboardNavigator() {
+  const { colors } = useTheme(); // Pull colors dynamically
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarStyle: {
-          backgroundColor: '#0F1014',
+          backgroundColor: colors.background,
           borderTopWidth: 1,
-          borderTopColor: 'rgba(255,255,255,0.055)',
+          borderTopColor: colors.border,
           height: Platform.OS === 'ios' ? 88 : 64,
           paddingBottom: Platform.OS === 'ios' ? 28 : 10,
           paddingTop: 10,
         },
-        tabBarActiveTintColor: ACCENT,
-        tabBarInactiveTintColor: 'rgba(255,255,255,0.25)',
+        tabBarActiveTintColor: colors.accent,
+        tabBarInactiveTintColor: colors.textDim,
         tabBarShowLabel: false,
         tabBarIcon: ({ color, focused }) => (
-          <View style={[tabStyles.wrap, focused && tabStyles.wrapActive]}>
+          <View style={[
+            { width: 44, height: 34, borderRadius: 11, alignItems: 'center', justifyContent: 'center' }, 
+            focused && { backgroundColor: colors.accentDim }
+          ]}>
             <Feather name={tabIcons[route.name] as any} size={21} color={color} />
           </View>
         ),
@@ -58,26 +63,22 @@ function DashboardNavigator() {
   );
 }
 
-const tabStyles = {
-  wrap: {
-    width: 44, height: 34, borderRadius: 11,
-    alignItems: 'center' as const, justifyContent: 'center' as const,
-  },
-  wrapActive: {
-    backgroundColor: 'rgba(59,111,212,0.12)',
-  },
-};
-
 function RootNavigator() {
   const { user } = useAuth();
+  const { theme } = useTheme();
+
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false, animation: 'fade' }}>
-      {user ? (
-        <Stack.Screen name="Dashboard" component={DashboardNavigator} />
-      ) : (
-        <Stack.Screen name="Login" component={LoginScreen} />
-      )}
-    </Stack.Navigator>
+    <>
+      <Stack.Navigator screenOptions={{ headerShown: false, animation: 'fade' }}>
+        {user ? (
+          <Stack.Screen name="Dashboard" component={DashboardNavigator} />
+        ) : (
+          <Stack.Screen name="Login" component={LoginScreen} />
+        )}
+      </Stack.Navigator>
+      {/* Make status bar match the theme */}
+      <StatusBar style={theme === 'dark' ? 'light' : 'dark'} />
+    </>
   );
 }
 
@@ -85,10 +86,11 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <AuthProvider>
-        <NavigationContainer>
-          <RootNavigator />
-          <StatusBar style="light" />
-        </NavigationContainer>
+        <ThemeProvider>
+          <NavigationContainer>
+            <RootNavigator />
+          </NavigationContainer>
+        </ThemeProvider>
       </AuthProvider>
     </SafeAreaProvider>
   );

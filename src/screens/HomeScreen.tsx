@@ -7,19 +7,17 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { decode } from 'base64-arraybuffer';
+import { useStudyReminders } from '../hooks/useStudyReminders';
+import LottieView from 'lottie-react-native';
+import { useTheme } from '../context/ThemeContext'; // <-- NEW IMPORT
 
-const ACCENT        = '#3B6FD4';
-const ACCENT_DIM    = 'rgba(59,111,212,0.10)';
-const ACCENT_BORDER = 'rgba(59,111,212,0.22)';
-const SUCCESS       = '#34C78A';
-const DANGER        = '#FF5252';
-const CARD_BG       = 'rgba(255,255,255,0.035)';
-const SW            = Dimensions.get('window').width;
+const ACCENT  = '#3B6FD4';
+const SW      = Dimensions.get('window').width;
 
 type PickedFile     = { name: string; uri: string; size: number; mimeType: string };
 type UploadState    = 'idle' | 'uploading' | 'analyzing' | 'done' | 'error';
@@ -35,7 +33,6 @@ function formatBytes(b: number) {
   return `${(b / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// Helper to safely parse storage numbers
 const parseQuotaValue = (value: string | null): number => {
   if (value == null) return 0;
   const numeric = Number(value);
@@ -43,6 +40,7 @@ const parseQuotaValue = (value: string | null): number => {
 };
 
 function FlashCard({ card }: { card: Flashcard }) {
+  const styles = useStyles();
   const [flipped, setFlipped] = useState(false);
   return (
     <TouchableOpacity style={[styles.flashCard, flipped && styles.flashCardFlipped]} onPress={() => setFlipped(!flipped)} activeOpacity={0.85}>
@@ -54,7 +52,11 @@ function FlashCard({ card }: { card: Flashcard }) {
 }
 
 function QuizCard({ item, index }: { item: QuizItem; index: number }) {
+  const styles = useStyles();
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
   const [selected, setSelected] = useState<number | null>(null);
+
   return (
     <View style={styles.quizCard}>
       <Text style={styles.quizQuestion}>{index + 1}. {item.question}</Text>
@@ -62,24 +64,28 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
         {item.options.map((opt, i) => {
           const isCorrect  = i === item.correctIndex;
           const isSelected = selected === i;
-          let bg = 'rgba(255,255,255,0.04)', border = 'rgba(255,255,255,0.08)', color = 'rgba(255,255,255,0.75)';
+          
+          let bg = isDark ? 'rgba(255,255,255,0.04)' : colors.background;
+          let border = colors.border;
+          let color = colors.text;
+
           if (selected !== null) {
-            if (isCorrect)       { bg = 'rgba(52,199,138,0.12)'; border = SUCCESS; color = SUCCESS; }
-            else if (isSelected) { bg = 'rgba(255,82,82,0.10)';  border = DANGER;  color = DANGER;  }
+            if (isCorrect)       { bg = colors.success + '20'; border = colors.success; color = colors.success; }
+            else if (isSelected) { bg = colors.danger + '20';  border = colors.danger;  color = colors.danger;  }
           }
           return (
             <TouchableOpacity key={`opt-${i}`} style={[styles.quizOption, { backgroundColor: bg, borderColor: border }]} onPress={() => { if (selected === null) setSelected(i); }} activeOpacity={0.8} disabled={selected !== null}>
               <Text style={[styles.quizOptionLetter, { color }]}>{String.fromCharCode(65 + i)}</Text>
               <Text style={[styles.quizOptionText, { color }]}>{opt}</Text>
-              {selected !== null && isCorrect    && <Feather name="check-circle" size={14} color={SUCCESS} />}
-              {selected !== null && isSelected && !isCorrect && <Feather name="x-circle" size={14} color={DANGER} />}
+              {selected !== null && isCorrect    && <Feather name="check-circle" size={14} color={colors.success} />}
+              {selected !== null && isSelected && !isCorrect && <Feather name="x-circle" size={14} color={colors.danger} />}
             </TouchableOpacity>
           );
         })}
       </View>
       {selected !== null && (
         <View style={styles.quizExplanation}>
-          <Feather name="info" size={12} color="rgba(255,255,255,0.35)" />
+          <Feather name="info" size={12} color={colors.textDim} />
           <Text style={styles.quizExplanationText}>{item.explanation}</Text>
         </View>
       )}
@@ -88,10 +94,13 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
 }
 
 export default function HomeScreen() {
+  const styles = useStyles(); // <-- NEW: Dynamic Styles
+  const { theme, colors } = useTheme();
   const { profile, user } = useAuth();
   const first    = (profile?.first_name ?? '').charAt(0) || '?';
   const last     = (profile?.last_name  ?? '').charAt(0) || '';
   const initials = (first + last).toUpperCase();
+  useStudyReminders();
 
   const [pickedFile,  setPickedFile]  = useState<PickedFile | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>('idle');
@@ -105,39 +114,41 @@ export default function HomeScreen() {
 
   const MAX_DAILY_UPLOADS = 3;
   const MAX_DAILY_EXAMS   = 1;
-
   const [uploadQuotaUsed, setUploadQuotaUsed] = useState(0);
   const [examQuotaUsed, setExamQuotaUsed]     = useState(0);
 
   const cardScale    = useRef(new Animated.Value(1)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
   const doneAnim     = useRef(new Animated.Value(0)).current;
+  const glowAnim     = useRef(new Animated.Value(0)).current; 
 
   const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
 
   useEffect(() => {
+    if (pickedFile && !isWorking && uploadState !== 'done') {
+      Animated.loop(Animated.sequence([
+        Animated.timing(glowAnim, { toValue: 1, duration: 1200, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(glowAnim, { toValue: 0, duration: 1200, easing: Easing.inOut(Easing.ease), useNativeDriver: true })
+      ])).start();
+    } else { glowAnim.stopAnimation(); }
+  }, [pickedFile, isWorking, uploadState]);
+
+  useEffect(() => {
     const loadDailyQuotas = async () => {
       if (!user) return;
-      
       const today = new Date().toLocaleDateString();
       try {
         const storedDate = await AsyncStorage.getItem(`@studia_date_${user.id}`);
-
         if (storedDate !== today) {
           await AsyncStorage.setItem(`@studia_date_${user.id}`, today);
           await AsyncStorage.setItem(`@studia_upload_quota_${user.id}`, '0');
           await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, '0');
-          setUploadQuotaUsed(0);
-          setExamQuotaUsed(0);
+          setUploadQuotaUsed(0); setExamQuotaUsed(0);
         } else {
-          const uQuota = await AsyncStorage.getItem(`@studia_upload_quota_${user.id}`);
-          const eQuota = await AsyncStorage.getItem(`@studia_exam_quota_${user.id}`);
-          setUploadQuotaUsed(parseQuotaValue(uQuota));
-          setExamQuotaUsed(parseQuotaValue(eQuota));
+          setUploadQuotaUsed(parseQuotaValue(await AsyncStorage.getItem(`@studia_upload_quota_${user.id}`)));
+          setExamQuotaUsed(parseQuotaValue(await AsyncStorage.getItem(`@studia_exam_quota_${user.id}`)));
         }
-      } catch (err) {
-        console.error("Error loading quotas", err);
-      }
+      } catch (err) { console.error(err); }
     };
     loadDailyQuotas();
   }, [user]);
@@ -150,33 +161,20 @@ export default function HomeScreen() {
   };
 
   const animateProgress = (to: number) => Animated.timing(progressAnim, { toValue: to, duration: 400, easing: Easing.out(Easing.cubic), useNativeDriver: false }).start();
-  
-  // This triggers the smooth bounce animation for our new success banner
   const showDoneBanner = () => { doneAnim.setValue(0); Animated.spring(doneAnim, { toValue: 1, tension: 120, friction: 10, useNativeDriver: true }).start(); };
 
   const handlePick = async () => {
     bumpScale();
-
-    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) {
-      Alert.alert(
-        "Daily Limit Reached", 
-        "You have used your 3 free document uploads for today. Please come back tomorrow."
-      );
-      return; 
-    }
-
-    const res = await DocumentPicker.getDocumentAsync({ type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'], copyToCacheDirectory: true });
+    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) { Alert.alert("Daily Limit Reached", "You have used your 3 free uploads for today."); return; }
+    const res = await DocumentPicker.getDocumentAsync({ 
+      type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.ms-powerpoint'], 
+      copyToCacheDirectory: true 
+    });
     if (!res.canceled) {
       const asset = res.assets[0];
-
-      if (asset.size && asset.size > 5 * 1024 * 1024) {
-        Alert.alert("File Too Large", "Please upload a document smaller than 5MB.");
-        return; 
-      }
-
+      if (asset.size && asset.size > 5 * 1024 * 1024) { Alert.alert("File Too Large", "Please upload a document smaller than 5MB."); return; }
       setPickedFile({ name: asset.name, uri: asset.uri, size: asset.size ?? 0, mimeType: asset.mimeType ?? 'application/octet-stream' });
-      setUploadState('idle'); setResult(null); setActiveView(null); setErrorMsg(''); setUploadedFilePath(null); setCurrentHistoryId(null);
-      progressAnim.setValue(0); doneAnim.setValue(0);
+      setUploadState('idle'); setResult(null); setActiveView(null); setErrorMsg(''); setUploadedFilePath(null); setCurrentHistoryId(null); progressAnim.setValue(0); doneAnim.setValue(0);
     }
   };
 
@@ -184,20 +182,13 @@ export default function HomeScreen() {
 
   const handleAnalyze = async () => {
     if (!pickedFile || !user) return;
-
-    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) {
-      Alert.alert("Daily Limit Reached", "You have used your 3 free document uploads for today.");
-      return; 
-    }
-
+    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) { Alert.alert("Daily Limit Reached", "You have used your 3 free document uploads for today."); return; }
     try {
       setUploadState('uploading'); animateProgress(0.15);
       const nameParts = pickedFile.name.split('.');
       const ext = nameParts.length > 1 ? nameParts[nameParts.length - 1] : null;
       const storagePath = ext ? `${user.id}/${Date.now()}.${ext}` : `${user.id}/${Date.now()}`;
-      
       setUploadedFilePath(storagePath); 
-
       animateProgress(0.35);
       
       const base64Str = await FileSystem.readAsStringAsync(pickedFile.uri, { encoding: FileSystem.EncodingType.Base64 });
@@ -225,110 +216,51 @@ export default function HomeScreen() {
         setCurrentHistoryId(historyId); 
         const newLesson = { id: historyId, fileName: pickedFile.name, date: new Date().toLocaleDateString(), content: generatedData };
         const existingHistory = await AsyncStorage.getItem('@studia_history');
-        
-        let historyArray = [];
-        if (existingHistory) {
-          try {
-             historyArray = JSON.parse(existingHistory);
-          } catch (e) {
-             console.error("Corrupted history JSON found, resetting.");
-          }
-        }
+        let historyArray = existingHistory ? JSON.parse(existingHistory) : [];
         historyArray.unshift(newLesson);
         await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
       } catch (e) { console.error("History save failed:", e); }
 
-      if (user) {
-        const newUploadQuota = uploadQuotaUsed + 1;
-        setUploadQuotaUsed(newUploadQuota);
-        await AsyncStorage.setItem(`@studia_upload_quota_${user.id}`, newUploadQuota.toString());
-      }
-
+      const newUploadQuota = uploadQuotaUsed + 1;
+      setUploadQuotaUsed(newUploadQuota);
+      await AsyncStorage.setItem(`@studia_upload_quota_${user.id}`, newUploadQuota.toString());
       setUploadState('done'); setActiveView(null); showDoneBanner();
-      // Removed the Alert popup for a smoother, subtle animated UI experience!
-
     } catch (err: any) {
-      setUploadState('error');
-      console.error("Upload error:", err);
-      
+      setUploadState('error'); console.error("Upload error:", err);
       const structuredErrorType = err?.errorType ?? err?.code ?? null;
-      const errorMessage = err?.message?.toLowerCase() || '';
-
-      const isRateLimit = structuredErrorType === 'rate_limited' || structuredErrorType === '429' || (!structuredErrorType && (errorMessage.includes('429') || errorMessage.includes('limit') || errorMessage.includes('too many requests')));
-      const isTimeout = structuredErrorType === 'timeout' || (!structuredErrorType && (errorMessage.includes('timeout') || errorMessage.includes('timed out')));
-      const isJsonError = structuredErrorType === 'json_parse_error' || (!structuredErrorType && (errorMessage.includes('json') || errorMessage.includes('546')));
-
-      if (isRateLimit || isTimeout || isJsonError) {
-        Alert.alert("Server is Catching its Breath!", "A lot of students are studying right now, and our free AI server is quite busy. Please wait 10 seconds and try again!");
-        setErrorMsg("Server busy. Please wait 10 seconds and retry.");
-      } else if (errorMessage.includes('network') || errorMessage.includes('failed to fetch')) {
-        Alert.alert("No Internet Connection", "Please check your Wi-Fi or mobile data and try again.");
-        setErrorMsg("No internet connection.");
-      } else {
-        Alert.alert("Analysis Failed", "We couldn't read this specific file. Please make sure it is a standard text-based PDF or DOCX.");
-        setErrorMsg("Failed to read document.");
-      }
-      animateProgress(0);
+      if (structuredErrorType === 'quota_exceeded') { Alert.alert("Daily Limit Reached", "Limit reached. Come back tomorrow!"); animateProgress(0); return; }
+      Alert.alert("Analysis Failed", "Could not process this file."); setErrorMsg("Failed to read document."); animateProgress(0);
     }
   };
 
   const handleGenerateExam = async () => {
-    if (!uploadedFilePath || !currentHistoryId) {
-      Alert.alert("Error", "Missing file data. Please re-upload the document.");
-      return;
-    }
-
-    if (examQuotaUsed >= MAX_DAILY_EXAMS) {
-      Alert.alert("Daily Limit Reached", "You have used your 1 free exam generation for today. Please come back tomorrow.");
-      return; 
-    }
-
+    if (!uploadedFilePath || !currentHistoryId) { Alert.alert("Error", "Missing file data."); return; }
+    if (examQuotaUsed >= MAX_DAILY_EXAMS) { Alert.alert("Daily Limit Reached", "You have used your 1 free exam generation for today."); return; }
     try {
       setIsGeneratingExam(true);
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('No active session. Please log in again.');
-
+      if (!session) throw new Error('No active session.');
       const { data: fnData, error: fnError } = await supabase.functions.invoke('generate-exam', {
-        body: { storagePath: uploadedFilePath, fileName: pickedFile?.name, userId: user?.id },
-        headers: { Authorization: `Bearer ${session.access_token}` },
+        body: { storagePath: uploadedFilePath, fileName: pickedFile?.name, userId: user?.id }, headers: { Authorization: `Bearer ${session.access_token}` },
       });
-
-      if (fnError) {
-        throw new Error(`Connection Failed. Have you deployed the 'generate-exam' edge function yet? Error: ${fnError.message}`);
-      }
-      if (!fnData?.success || !fnData?.exam) {
-        throw new Error(fnData?.error ?? 'Failed to generate 50 items. The AI might be busy.');
-      }
-
-      const newExam = fnData.exam;
-
-      setResult(prev => prev ? { ...prev, exam: newExam } : null);
-
-      try {
-        const existingHistoryStr = await AsyncStorage.getItem('@studia_history');
-        if (existingHistoryStr) {
-          let historyArray = JSON.parse(existingHistoryStr);
-          const index = historyArray.findIndex((item: any) => item.id === currentHistoryId);
-          if (index !== -1) {
-            historyArray[index].content.exam = newExam;
-            await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
-          }
+      if (fnError || !fnData?.success) throw new Error("Failed to generate exam.");
+      setResult(prev => prev ? { ...prev, exam: fnData.exam } : null);
+      
+      const existingHistoryStr = await AsyncStorage.getItem('@studia_history');
+      if (existingHistoryStr) {
+        let historyArray = JSON.parse(existingHistoryStr);
+        const index = historyArray.findIndex((item: any) => item.id === currentHistoryId);
+        if (index !== -1) {
+          historyArray[index].content.exam = fnData.exam;
+          await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
         }
-      } catch (e) { console.error("Failed to save exam to history:", e); }
-
-      if (user) {
-        const newQuota = examQuotaUsed + 1;
-        setExamQuotaUsed(newQuota);
-        await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, newQuota.toString());
       }
-
+      setExamQuotaUsed(examQuotaUsed + 1);
+      await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, (examQuotaUsed + 1).toString());
       setActiveView('exam');
     } catch (err: any) {
-      console.error(err);
-      Alert.alert("Generation Failed", err?.message || "Something went wrong.");
-    } finally {
-      setIsGeneratingExam(false);
-    }
+      Alert.alert("Generation Failed", "Something went wrong.");
+    } finally { setIsGeneratingExam(false); }
   };
 
   const uploadsLeft = Math.max(0, MAX_DAILY_UPLOADS - uploadQuotaUsed);
@@ -340,19 +272,12 @@ export default function HomeScreen() {
     { key: 'flashcards'as ActiveView, icon: 'layers',       label: 'Flashcards', desc: 'Q&A study cards',     count: result?.flashcards.length },
     { key: 'quiz'      as ActiveView, icon: 'check-square', label: 'Quiz',       desc: 'Test your knowledge', count: result?.quiz.length },
     { key: 'hardQuiz'  as ActiveView, icon: 'award',        label: 'Hard Quiz',  desc: '5 Challenge questions', count: result?.hardQuiz?.length },
-    { 
-      key: 'exam'      as ActiveView, 
-      icon: 'file-text',    
-      label: 'Final Exam', 
-      desc: result?.exam ? 'University Level' : `${examsLeft} remaining today`, 
-      count: result?.exam?.length, 
-      isLocked: !result?.exam && examQuotaUsed >= MAX_DAILY_EXAMS 
-    },
+    { key: 'exam'      as ActiveView, icon: 'file-text',    label: 'Final Exam', desc: result?.exam ? 'University Level' : `${examsLeft} remaining today`, count: result?.exam?.length, isLocked: !result?.exam && examQuotaUsed >= MAX_DAILY_EXAMS },
   ];
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle={theme === 'dark' ? "light-content" : "dark-content"} />
       <SafeAreaView style={styles.safe}>
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
@@ -361,234 +286,152 @@ export default function HomeScreen() {
               <Image source={require('../../assets/icon.png')} style={styles.logoImage} resizeMode="contain" />
               <Text style={styles.appName}>Studia</Text>
             </View>
-            <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{initials}</Text>
-            </View>
+            <View style={styles.avatar}><Text style={styles.avatarText}>{initials}</Text></View>
           </View>
 
           {!pickedFile && (
             <View style={styles.idleContainer}>
               <Animated.View style={[styles.uploadCard, { transform: [{ scale: cardScale }] }]}>
-                <TouchableOpacity style={[styles.uploadTouchable, isWorking && { opacity: 0.5 }]} onPress={handlePick} activeOpacity={1} disabled={isWorking}>
+                <TouchableOpacity style={styles.uploadTouchable} onPress={handlePick} activeOpacity={1}>
                   <View style={styles.gridLines} pointerEvents="none">
                     {[0,1,2,3].map(i => <View key={`h${i}`} style={[styles.gridLine,  { top:  `${25*(i+1)}%` as any }]} />)}
                     {[0,1,2,3].map(i => <View key={`v${i}`} style={[styles.gridLineV, { left: `${25*(i+1)}%` as any }]} />)}
                   </View>
-                  
-                  {isWorking ? (
-                    <View style={styles.uploadCenter}>
-                      <ActivityIndicator size="large" color={ACCENT} />
-                      <Text style={styles.uploadTitle}>AI is reading your document...</Text>
-                      <Text style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12, textAlign: 'center', marginTop: 8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) }}>
-                        Please do not close the app.{"\n"}This usually takes 5-10 seconds.
-                      </Text>
+                  <View style={styles.uploadCenter}>
+                    <View style={styles.uploadIconOuter}><View style={styles.uploadIconInner}><Feather name="upload-cloud" size={36} color={ACCENT} /></View></View>
+                    <Text style={styles.uploadTitle}>Drop your file here</Text>
+                    <View style={styles.formatRow}>
+                      <View style={styles.formatPill}><Text style={styles.formatText}>PDF</Text></View><View style={styles.formatDivider} />
+                      <View style={styles.formatPill}><Text style={styles.formatText}>DOCX</Text></View><View style={styles.formatDivider} />
+                      <View style={styles.formatPill}><Text style={styles.formatText}>PPTX</Text></View>
                     </View>
-                  ) : (
-                    <View style={styles.uploadCenter}>
-                      <View style={styles.uploadIconOuter}>
-                        <View style={styles.uploadIconInner}>
-                          <Feather name="upload-cloud" size={36} color={ACCENT} />
-                        </View>
-                      </View>
-                      <Text style={styles.uploadTitle}>Drop your file here</Text>
-                      <View style={styles.formatRow}>
-                        <View style={styles.formatPill}><Text style={styles.formatText}>PDF</Text></View>
-                        <View style={styles.formatDivider} />
-                        <View style={styles.formatPill}><Text style={styles.formatText}>DOCX</Text></View>
-                      </View>
-                      <Text style={{ color: 'rgba(255,255,255,0.4)', fontSize: 12, marginTop: 4 }}>
-                        Max file size: 5MB • <Text style={{ color: uploadsLeft === 0 ? DANGER : SUCCESS, fontWeight: 'bold' }}>{uploadsLeft} uploads left today</Text>
-                      </Text>
-                    </View>
-                  )}
+                    <Text style={{ color: colors.textDim, fontSize: 12, marginTop: 4 }}>Max file size: 5MB • <Text style={{ color: uploadsLeft === 0 ? colors.danger : colors.success, fontWeight: 'bold' }}>{uploadsLeft} uploads left today</Text></Text>
+                  </View>
                 </TouchableOpacity>
               </Animated.View>
-
-              <Text style={styles.idleSubtitle}>
-                Upload a document to instantly generate flashcards, quizzes, and exam.
-              </Text>
+              <Text style={styles.idleSubtitle}>Upload a document to instantly generate flashcards, quizzes, and exam.</Text>
             </View>
           )}
 
           {pickedFile && (
             <View style={styles.section}>
-              <View style={styles.attachCard}>
-                <View style={styles.fileRow}>
-                  <View style={styles.fileIconWrap}><Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={20} color={ACCENT} /></View>
-                  <View style={styles.fileMeta}>
-                    <Text style={styles.fileName} numberOfLines={1}>{pickedFile.name}</Text>
-                    <Text style={styles.fileSize}>{formatBytes(pickedFile.size)}</Text>
+              {isWorking && (
+                <View style={styles.workingContainer}>
+                  <LottieView source={require('../../assets/scan.json')} autoPlay loop style={{ width: 280, height: 280 }} />
+                  <Text style={styles.workingTitle}>{uploadState === 'uploading' ? 'Uploading Document...' : 'Analyzing File...'}</Text>
+                  <Text style={styles.workingSubtitle}>{uploadState === 'uploading' ? `Securely sending ${pickedFile.name} to the cloud.` : 'Extracting concepts and drafting your exam. This usually takes 10-30 seconds.'}</Text>
+                  <View style={styles.largeProgressTrack}>
+                    <Animated.View style={[styles.largeProgressFill, { width: progressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]} />
                   </View>
-                  {!isWorking && uploadState !== 'done' && (
-                    <TouchableOpacity style={styles.removeBtn} onPress={handleRemove} hitSlop={{ top:8, bottom:8, left:8, right:8 }}>
-                      <Feather name="x" size={14} color="rgba(255,255,255,0.35)" />
-                    </TouchableOpacity>
-                  )}
-                  {uploadState === 'done' && <View style={styles.successBadge}><Feather name="check" size={13} color={SUCCESS} /></View>}
                 </View>
+              )}
 
-                {(isWorking || uploadState === 'done') && (
-                  <View style={styles.progressTrack}>
-                    <Animated.View style={[styles.progressFill, { backgroundColor: uploadState === 'done' ? SUCCESS : ACCENT, width: progressAnim.interpolate({ inputRange: [0,1], outputRange: ['0%','100%'] }) }]} />
-                  </View>
-                )}
-
-                {isWorking && (
-                  <View style={styles.statusRow}>
-                    <ActivityIndicator size="small" color={ACCENT} />
-                    <Text style={styles.statusText}>{uploadState === 'uploading' ? 'Uploading...' : 'AI is reading your document...'}</Text>
-                  </View>
-                )}
-
-                {uploadState === 'error' && (
-                  <View style={styles.errorRow}>
-                    <Feather name="alert-circle" size={13} color={DANGER} />
-                    <Text style={styles.errorText}>{errorMsg}</Text>
-                  </View>
-                )}
-
-                {!isWorking && (
-                  <View style={styles.actionRow}>
-                    {uploadState !== 'done' && (
-                      <TouchableOpacity style={styles.secondaryBtn} onPress={handlePick}>
-                        <Feather name="refresh-ccw" size={13} color="rgba(255,255,255,0.5)" />
-                        <Text style={styles.secondaryBtnText}>Change</Text>
-                      </TouchableOpacity>
+              {!isWorking && uploadState !== 'done' && (
+                 <View style={styles.readyContainer}>
+                    <View style={styles.readyFilePreview}>
+                      <View style={styles.readyFileIconWrap}><Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={32} color={ACCENT} /></View>
+                      <Text style={styles.readyFileName} numberOfLines={1}>{pickedFile.name}</Text>
+                      <Text style={styles.readyFileSize}>{formatBytes(pickedFile.size)} • Ready for AI processing</Text>
+                    </View>
+                    {uploadState === 'error' && (
+                      <View style={styles.readyErrorBox}><Feather name="alert-triangle" size={14} color={colors.danger} /><Text style={styles.readyErrorText}>{errorMsg}</Text></View>
                     )}
-                    {uploadState === 'done' ? (
-                      <TouchableOpacity style={[styles.primaryBtn, { flex:1 }]} onPress={handleRemove}>
-                        <Feather name="plus" size={15} color="#fff" />
-                        <Text style={styles.primaryBtnText}>New upload</Text>
+                    <View style={styles.analyzeBtnWrapper}>
+                      <Animated.View style={[styles.analyzeBtnGlow, { transform: [{ scale: glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.05] }) }], opacity: glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }) }]} />
+                      <TouchableOpacity style={[styles.analyzeBtn, uploadState === 'error' && { backgroundColor: colors.danger }]} onPress={handleAnalyze} activeOpacity={0.85}>
+                         <Feather name={uploadState === 'error' ? 'rotate-cw' : 'cpu'} size={22} color="#fff" />
+                         <Text style={styles.analyzeBtnText}>{uploadState === 'error' ? 'Retry Analysis' : 'Start Analysis'}</Text>
                       </TouchableOpacity>
-                    ) : (
-                      <TouchableOpacity style={[styles.primaryBtn, uploadState === 'error' && { backgroundColor: '#C0392B' }]} onPress={handleAnalyze}>
-                        <Feather name={uploadState === 'error' ? 'rotate-cw' : 'zap'} size={15} color="#fff" />
-                        <Text style={styles.primaryBtnText}>{uploadState === 'error' ? 'Retry' : 'Analyze'}</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                )}
-              </View>
+                    </View>
+                    <TouchableOpacity style={styles.changeFileBtn} onPress={handlePick}>
+                      <Feather name="refresh-ccw" size={14} color={colors.textDim} />
+                      <Text style={styles.changeFileText}>Select a different file</Text>
+                    </TouchableOpacity>
+                 </View>
+              )}
 
-              {/* --- NEW ANIMATED SUCCESS BANNER & OUTPUT GRID --- */}
-              {result && uploadState === 'done' && activeView === null && !isGeneratingExam && (
-                <View style={{ gap: 14 }}>
-                  <Animated.View style={{
-                    opacity: doneAnim,
-                    transform: [{ translateY: doneAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) }]
-                  }}>
-                    <View style={styles.doneBanner}>
-                      <View style={styles.doneBannerLeft}>
-                        <View style={styles.doneIconWrap}>
-                          <Feather name="check" size={18} color={SUCCESS} />
+              {uploadState === 'done' && (
+                <>
+                  <View style={styles.doneCompactCard}>
+                    {/* BACK BUTTON (Moved to the left side) */}
+                    <TouchableOpacity style={styles.newUploadBtn} onPress={handleRemove} activeOpacity={0.7}>
+                      <Feather name="arrow-left" size={20} color={colors.text} />
+                    </TouchableOpacity>
+
+                    <View style={styles.doneCompactIcon}>
+                      <Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={20} color={ACCENT} />
+                    </View>
+                    
+                    <View style={styles.doneCompactMeta}>
+                      <Text style={styles.doneCompactName} numberOfLines={1}>{pickedFile.name}</Text>
+                      <Text style={styles.doneCompactSize}>{formatBytes(pickedFile.size)}</Text>
+                    </View>
+                  </View>
+
+                  {result && activeView === null && !isGeneratingExam && (
+                    <View style={{ gap: 14 }}>
+                      <Animated.View style={{ opacity: doneAnim, transform: [{ translateY: doneAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) }] }}>
+                        <View style={styles.doneBanner}>
+                          <View style={styles.doneBannerLeft}>
+                            <View style={styles.doneIconWrap}><Feather name="check" size={18} color={colors.success} /></View>
+                            <View>
+                              <Text style={styles.doneBannerTitle}>Analysis Complete!</Text>
+                              <Text style={styles.doneBannerSub}>Select a category below to start studying.</Text>
+                            </View>
+                          </View>
                         </View>
-                        <View>
-                          <Text style={styles.doneBannerTitle}>Analysis Complete!</Text>
-                          <Text style={styles.doneBannerSub}>Select a category below to start studying.</Text>
-                        </View>
+                      </Animated.View>
+                      <View style={styles.outputGrid}>
+                        {OUTPUT_CARDS.map((card) => {
+                          const isLocked = card.isLocked;
+                          return (
+                            <TouchableOpacity key={card.key} style={[styles.outputCard, isLocked && styles.outputCardLocked]} onPress={() => { if (card.key === 'exam' && !result?.exam) { if (isLocked) Alert.alert("Limit Reached", "You have already used your 1 exam generation for today."); else handleGenerateExam(); } else { setActiveView(card.key); } }} activeOpacity={isLocked ? 1 : 0.8}>
+                              <View style={styles.outputCardTop}>
+                                <View style={[styles.outputIconWrap, isLocked && styles.outputIconWrapLocked]}><Feather name={isLocked ? "lock" : card.icon as any} size={20} color={isLocked ? colors.textDim : ACCENT} /></View>
+                                {!isLocked && <Feather name="arrow-right" size={14} color={colors.border} />}
+                              </View>
+                              <Text style={[styles.outputCardLabel, isLocked && styles.outputCardLabelLocked]}>{card.label}</Text>
+                              <Text style={styles.outputCardDesc}>{card.desc}</Text>
+                              {card.count != null && ( <View style={styles.outputCardCount}><Text style={styles.outputCardCountText}>{card.count} items</Text></View> )}
+                            </TouchableOpacity>
+                          );
+                        })}
                       </View>
                     </View>
-                  </Animated.View>
+                  )}
 
-                  <View style={styles.outputGrid}>
-                    {OUTPUT_CARDS.map((card) => {
-                      const isLocked = card.isLocked;
-                      return (
-                        <TouchableOpacity
-                          key={card.key}
-                          style={[styles.outputCard, isLocked && styles.outputCardLocked]}
-                          onPress={() => {
-                            if (card.key === 'exam' && !result?.exam) {
-                              if (isLocked) Alert.alert("Limit Reached", "You have already used your 1 exam generation for today.");
-                              else handleGenerateExam();
-                            } else {
-                              setActiveView(card.key);
-                            }
-                          }}
-                          activeOpacity={isLocked ? 1 : 0.8}
-                        >
-                          <View style={styles.outputCardTop}>
-                            <View style={[styles.outputIconWrap, isLocked && styles.outputIconWrapLocked]}>
-                              <Feather name={isLocked ? "lock" : card.icon as any} size={20} color={isLocked ? "rgba(255,255,255,0.4)" : ACCENT} />
-                            </View>
-                            {!isLocked && <Feather name="arrow-right" size={14} color="rgba(255,255,255,0.2)" />}
-                          </View>
-                          <Text style={[styles.outputCardLabel, isLocked && styles.outputCardLabelLocked]}>{card.label}</Text>
-                          <Text style={styles.outputCardDesc}>{card.desc}</Text>
-                          {card.count != null && (
-                            <View style={styles.outputCardCount}>
-                              <Text style={styles.outputCardCountText}>{card.count} items</Text>
-                            </View>
-                          )}
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                </View>
+                  {isGeneratingExam && (
+                    <View style={styles.generatingOverlay}>
+                      {/* --- UPDATED TO USE loading.json --- */}
+                      <LottieView 
+                        source={require('../../assets/loading.json')} 
+                        autoPlay 
+                        loop 
+                        style={{ width: 160, height: 160 }} 
+                      />
+                      <Text style={styles.generatingText}>The cat is generating your Exam...</Text>
+                      <Text style={styles.generatingSubText}>Please wait</Text>
+                    </View>
+                  )}
+
+                  {result && activeView !== null && (
+                    <View style={styles.contentSection}>
+                      <View style={styles.contentHeader}>
+                        <TouchableOpacity style={styles.backBtn} onPress={() => setActiveView(null)}><Feather name="arrow-left" size={15} color={colors.text} /></TouchableOpacity>
+                        <Text style={styles.contentTitle}>
+                          {activeView === 'summary' ? 'Summary' : activeView === 'concepts' ? `Key Concepts · ${result.keyConceptsList.length}` : activeView === 'flashcards'? `Flashcards · ${result.flashcards.length}` : activeView === 'quiz' ? `Quiz · ${result.quiz.length}` : activeView === 'exam' ? `Final Exam · ${result.exam?.length}` : `Hard Quiz · ${result.hardQuiz.length}`}
+                        </Text>
+                      </View>
+                      {activeView === 'summary' && ( <View style={styles.summaryBox}><Text style={styles.summaryText}>{result.summary}</Text></View> )}
+                      {activeView === 'concepts' && ( <View style={styles.conceptsList}>{result.keyConceptsList.map((c, i) => ( <View key={`concept-${i}`} style={styles.conceptItem}><View style={styles.conceptDot} /><View style={styles.conceptContent}><Text style={styles.conceptTerm}>{c.term}</Text><Text style={styles.conceptDef}>{c.definition}</Text></View></View> ))}</View> )}
+                      {activeView === 'flashcards' && ( <View style={styles.flashList}><View style={styles.hintRow}><Feather name="rotate-cw" size={11} color={colors.textDim} /><Text style={styles.hintText}>Tap a card to flip</Text></View>{result.flashcards.map((fc, i) => <FlashCard key={`flashcard-${i}`} card={fc} />)}</View> )}
+                      {activeView === 'quiz' && ( <View style={styles.quizList}><View style={styles.hintRow}><Feather name="target" size={11} color={colors.textDim} /><Text style={styles.hintText}>Tap an option to answer</Text></View>{result.quiz.map((q, i) => <QuizCard key={`quiz-${i}`} item={q} index={i} />)}</View> )}
+                      {activeView === 'hardQuiz' && ( <View style={styles.quizList}>{result.hardQuiz.map((q, i) => <QuizCard key={`hard-quiz-${i}`} item={q} index={i} />)}</View> )}
+                      {activeView === 'exam' && ( <View style={styles.quizList}><View style={styles.hintRow}><Feather name="award" size={11} color={colors.textDim} /><Text style={styles.hintText}>University Level Examination</Text></View>{result.exam?.map((q, i) => <QuizCard key={`exam-q-${i}`} item={q} index={i} />)}</View> )}
+                    </View>
+                  )}
+                </>
               )}
-
-              {isGeneratingExam && (
-                <View style={styles.generatingOverlay}>
-                  <ActivityIndicator size="large" color="#9B51E0" />
-                  <Text style={styles.generatingText}>Drafting 50-Item Exam...</Text>
-                  <Text style={styles.generatingSubText}>This may take up to 60 seconds.</Text>
-                </View>
-              )}
-
-              {result && activeView !== null && (
-                <View style={styles.contentSection}>
-                  <View style={styles.contentHeader}>
-                    <TouchableOpacity style={styles.backBtn} onPress={() => setActiveView(null)}>
-                      <Feather name="arrow-left" size={15} color="rgba(255,255,255,0.6)" />
-                    </TouchableOpacity>
-                    <Text style={styles.contentTitle}>
-                      {activeView === 'summary'    ? 'Summary'
-                      : activeView === 'concepts'  ? `Key Concepts · ${result.keyConceptsList.length}`
-                      : activeView === 'flashcards'? `Flashcards · ${result.flashcards.length}`
-                      : activeView === 'quiz'      ? `Quiz · ${result.quiz.length}`
-                      : activeView === 'exam'      ? `Final Exam · ${result.exam?.length}`
-                      :                              `Hard Quiz · ${result.hardQuiz.length}`}
-                    </Text>
-                  </View>
-
-                  {activeView === 'summary' && (
-                    <View style={styles.summaryBox}><Text style={styles.summaryText}>{result.summary}</Text></View>
-                  )}
-                  {activeView === 'concepts' && (
-                    <View style={styles.conceptsList}>
-                      {result.keyConceptsList.map((c, i) => (
-                        <View key={`concept-${i}`} style={styles.conceptItem}>
-                          <View style={styles.conceptDot} /><View style={styles.conceptContent}><Text style={styles.conceptTerm}>{c.term}</Text><Text style={styles.conceptDef}>{c.definition}</Text></View>
-                        </View>
-                      ))}
-                    </View>
-                  )}
-                  {activeView === 'flashcards' && (
-                    <View style={styles.flashList}>
-                      <View style={styles.hintRow}><Feather name="rotate-cw" size={11} color="rgba(255,255,255,0.25)" /><Text style={styles.hintText}>Tap a card to flip</Text></View>
-                      {result.flashcards.map((fc, i) => <FlashCard key={`flashcard-${i}`} card={fc} />)}
-                    </View>
-                  )}
-                  {activeView === 'quiz' && (
-                    <View style={styles.quizList}>
-                      <View style={styles.hintRow}><Feather name="target" size={11} color="rgba(255,255,255,0.25)" /><Text style={styles.hintText}>Tap an option to answer</Text></View>
-                      {result.quiz.map((q, i) => <QuizCard key={`quiz-${i}`} item={q} index={i} />)}
-                    </View>
-                  )}
-                  {activeView === 'hardQuiz' && (
-                    <View style={styles.quizList}>
-                      {result.hardQuiz.map((q, i) => <QuizCard key={`hard-quiz-${i}`} item={q} index={i} />)}
-                    </View>
-                  )}
-                  {activeView === 'exam' && (
-                    <View style={styles.quizList}>
-                      <View style={styles.hintRow}><Feather name="award" size={11} color="rgba(255,255,255,0.25)" /><Text style={styles.hintText}>University Level Examination</Text></View>
-                      {result.exam?.map((q, i) => <QuizCard key={`exam-q-${i}`} item={q} index={i} />)}
-                    </View>
-                  )}
-                </View>
-              )}
-
             </View>
           )}
 
@@ -598,118 +441,126 @@ export default function HomeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0C0D12' },
-  safe:   { flex: 1 },
-  scroll: { flexGrow: 1, paddingBottom: 56 },
+// --- NEW: DYNAMIC STYLES ---
+const useStyles = () => {
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
 
-  header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 6, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 }, 
-  logoImage: { width: 32, height: 32, borderRadius: 8 }, 
-  appName: { fontSize: 20, fontWeight: '800', color: '#FFFFFF', letterSpacing: -0.8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  appSubtitle: { fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  avatar: { width: 38, height: 38, borderRadius: 19, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  avatarText: { fontSize: 13, fontWeight: '700', color: ACCENT, letterSpacing: 0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+  return StyleSheet.create({
+    container: { flex: 1, backgroundColor: colors.background },
+    safe:   { flex: 1 },
+    scroll: { flexGrow: 1, paddingBottom: 56 },
 
-  idleContainer: { flex: 1, justifyContent: 'center', paddingBottom: 40 },
-  idleSubtitle: { textAlign: 'center', color: 'rgba(255,255,255,0.4)', fontSize: 13, marginTop: 24, paddingHorizontal: 40, lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 6, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 }, 
+    logoImage: { width: 32, height: 32, borderRadius: 8 }, 
+    appName: { fontSize: 20, fontWeight: '800', color: colors.text, letterSpacing: -0.8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    avatar: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, alignItems: 'center', justifyContent: 'center' },
+    avatarText: { fontSize: 13, fontWeight: '700', color: colors.accent, letterSpacing: 0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  tipBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(59,111,212,0.08)', borderWidth: 1, borderColor: 'rgba(59,111,212,0.15)', borderRadius: 12, padding: 12, marginHorizontal: 24, marginTop: 16, gap: 10 },
-  tipIconWrap: { width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(59,111,212,0.15)', alignItems: 'center', justifyContent: 'center' },
-  tipText: { flex: 1, fontSize: 12, color: 'rgba(255,255,255,0.6)', lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    idleContainer: { flex: 1, justifyContent: 'center', paddingBottom: 40 },
+    idleSubtitle: { textAlign: 'center', color: colors.textDim, fontSize: 13, marginTop: 24, paddingHorizontal: 40, lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
 
-  uploadCard: { marginHorizontal: 24, height: SW * 0.72, borderRadius: 24, backgroundColor: 'rgba(59,111,212,0.05)', borderWidth: 1.5, borderColor: ACCENT_BORDER, borderStyle: 'dashed', overflow: 'hidden' },
-  uploadTouchable: { flex: 1 },
-  gridLines:  { ...StyleSheet.absoluteFillObject },
-  gridLine:   { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: 'rgba(59,111,212,0.07)' },
-  gridLineV:  { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: 'rgba(59,111,212,0.07)' },
-  uploadCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
-  uploadIconOuter: { width: 100, height: 100, borderRadius: 50, backgroundColor: 'rgba(59,111,212,0.08)', borderWidth: 1, borderColor: 'rgba(59,111,212,0.15)', alignItems: 'center', justifyContent: 'center' },
-  uploadIconInner: { width: 72, height: 72, borderRadius: 36, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  uploadTitle: { fontSize: 18, fontWeight: '600', color: 'rgba(255,255,255,0.75)', letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  formatRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  formatPill: { paddingHorizontal: 14, paddingVertical: 5, borderRadius: 20, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER },
-  formatText: { fontSize: 11, fontWeight: '700', color: ACCENT, letterSpacing: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  formatDivider: { width: 4, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)' },
+    uploadCard: { marginHorizontal: 24, height: SW * 0.72, borderRadius: 24, backgroundColor: isDark ? 'rgba(59,111,212,0.05)' : colors.cardBg, borderWidth: 1.5, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, borderStyle: 'dashed', overflow: 'hidden' },
+    uploadTouchable: { flex: 1 },
+    gridLines:  { ...StyleSheet.absoluteFillObject },
+    gridLine:   { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: isDark ? 'rgba(59,111,212,0.07)' : colors.background },
+    gridLineV:  { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: isDark ? 'rgba(59,111,212,0.07)' : colors.background },
+    uploadCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
+    uploadIconOuter: { width: 100, height: 100, borderRadius: 50, backgroundColor: isDark ? 'rgba(59,111,212,0.08)' : colors.background, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.15)' : colors.border, alignItems: 'center', justifyContent: 'center' },
+    uploadIconInner: { width: 72, height: 72, borderRadius: 36, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, alignItems: 'center', justifyContent: 'center' },
+    uploadTitle: { fontSize: 18, fontWeight: '600', color: colors.text, letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    formatRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    formatPill: { paddingHorizontal: 14, paddingVertical: 5, borderRadius: 20, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border },
+    formatText: { fontSize: 11, fontWeight: '700', color: colors.accent, letterSpacing: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    formatDivider: { width: 4, height: 4, borderRadius: 2, backgroundColor: colors.border },
 
-  section:     { paddingHorizontal: 24, marginTop: 10, gap: 14 },
-  attachCard:  { backgroundColor: CARD_BG, borderRadius: 20, borderWidth: 1, borderColor: ACCENT_BORDER, padding: 16, gap: 14 },
-  fileRow:     { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  fileIconWrap:{ width: 46, height: 46, borderRadius: 13, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  fileMeta:    { flex: 1, gap: 3 },
-  fileName:    { fontSize: 14, fontWeight: '600', color: '#FFFFFF', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  fileSize:    { fontSize: 11, color: 'rgba(255,255,255,0.32)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  removeBtn:   { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.06)', alignItems: 'center', justifyContent: 'center' },
-  successBadge:{ width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(52,199,138,0.12)', alignItems: 'center', justifyContent: 'center' },
-  progressTrack: { height: 3, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.07)', overflow: 'hidden' },
-  progressFill:  { height: 3, borderRadius: 2 },
-  statusRow:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  statusText:  { fontSize: 12, color: 'rgba(255,255,255,0.45)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  errorRow:    { flexDirection: 'row', alignItems: 'flex-start', gap: 7 },
-  errorText:   { fontSize: 12, color: DANGER, flex: 1, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  actionRow:   { flexDirection: 'row', gap: 10 },
-  secondaryBtn:{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
-  secondaryBtnText: { fontSize: 13, fontWeight: '500', color: 'rgba(255,255,255,0.5)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  primaryBtn:  { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingVertical: 13, borderRadius: 12, backgroundColor: ACCENT },
-  primaryBtnText: { fontSize: 14, fontWeight: '600', color: '#FFFFFF', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    section: { paddingHorizontal: 24, marginTop: 10, gap: 14 },
 
-  doneBanner: { backgroundColor: 'rgba(52,199,138,0.08)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(52,199,138,0.2)', padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  doneBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  doneIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: 'rgba(52,199,138,0.12)', alignItems: 'center', justifyContent: 'center' },
-  doneBannerTitle: { fontSize: 14, fontWeight: '600', color: SUCCESS, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  doneBannerSub:   { fontSize: 11, color: 'rgba(52,199,138,0.6)', marginTop: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  doneStatRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  doneStat:    { fontSize: 11, color: 'rgba(52,199,138,0.7)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  doneStatDot: { width: 3, height: 3, borderRadius: 2, backgroundColor: 'rgba(52,199,138,0.4)' },
+    readyContainer: { backgroundColor: colors.cardBg, borderRadius: 24, borderWidth: 1, borderColor: colors.border, padding: 30, alignItems: 'center', gap: 20 },
+    readyFilePreview: { alignItems: 'center', gap: 8, marginBottom: 6 },
+    readyFileIconWrap: { width: 72, height: 72, borderRadius: 20, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+    readyFileName: { fontSize: 18, fontWeight: '700', color: colors.text, textAlign: 'center', paddingHorizontal: 10, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-bold' }) },
+    readyFileSize: { fontSize: 13, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    readyErrorBox: { flexDirection: 'row', backgroundColor: colors.dangerDim, borderWidth: 1, borderColor: isDark ? 'rgba(255,82,82,0.2)' : colors.danger, padding: 12, borderRadius: 12, gap: 8, width: '100%' },
+    readyErrorText: { color: colors.danger, fontSize: 12, flex: 1, lineHeight: 18 },
+    
+    analyzeBtnWrapper: { width: '100%', position: 'relative', marginTop: 10 },
+    analyzeBtnGlow: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.accent, borderRadius: 20 },
+    analyzeBtn: { backgroundColor: colors.accent, borderRadius: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 18, gap: 12 },
+    analyzeBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', letterSpacing: 0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-bold' }) },
+    
+    changeFileBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 },
+    changeFileText: { color: colors.textDim, fontSize: 13, fontWeight: '500', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  outputGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  outputCard: { width: (SW - 48 - 10) / 2, backgroundColor: CARD_BG, borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', padding: 16, gap: 6 },
-  outputCardLocked: { backgroundColor: 'rgba(255,255,255,0.01)', borderColor: 'rgba(255,255,255,0.03)' },
-  outputCardTop:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  outputIconWrap: { width: 40, height: 40, borderRadius: 12, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, alignItems: 'center', justifyContent: 'center' },
-  outputIconWrapLocked: { backgroundColor: 'rgba(255,255,255,0.03)', borderColor: 'transparent' },
-  outputCardLabel:{ fontSize: 15, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  outputCardLabelLocked: { color: 'rgba(255,255,255,0.3)' },
-  outputCardDesc: { fontSize: 11, color: 'rgba(255,255,255,0.35)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  outputCardCount:{ alignSelf: 'flex-start', marginTop: 4, backgroundColor: ACCENT_DIM, borderWidth: 1, borderColor: ACCENT_BORDER, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
-  outputCardCountText: { fontSize: 10, fontWeight: '600', color: ACCENT, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    doneCompactCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.cardBg, borderRadius: 18, borderWidth: 1, borderColor: colors.border, padding: 14, gap: 14 },
+    doneCompactIcon: { width: 44, height: 44, borderRadius: 12, backgroundColor: colors.accentDim, alignItems: 'center', justifyContent: 'center' },
+    doneCompactMeta: { flex: 1 },
+    doneCompactName: { color: colors.text, fontSize: 15, fontWeight: '600', marginBottom: 2 },
+    doneCompactSize: { color: colors.textDim, fontSize: 11 },
+    newUploadBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : colors.background, alignItems: 'center', justifyContent: 'center' },
 
-  generatingOverlay: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(155,81,224,0.3)', padding: 30, alignItems: 'center', gap: 10, marginTop: 10 },
-  generatingText: { color: '#FFF', fontSize: 16, fontWeight: '700', marginTop: 10 },
-  generatingSubText: { color: 'rgba(255,255,255,0.5)', fontSize: 12 },
+    workingContainer: { alignItems: 'center', justifyContent: 'center', paddingVertical: 40, backgroundColor: colors.cardBg, borderRadius: 24, borderWidth: 1, borderColor: colors.border },
+    workingTitle: { fontSize: 20, fontWeight: '700', color: colors.text, marginTop: 10, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-bold' }) },
+    workingSubtitle: { fontSize: 13, color: colors.textDim, textAlign: 'center', paddingHorizontal: 30, marginTop: 8, lineHeight: 20 },
+    largeProgressTrack: { width: '80%', height: 6, borderRadius: 3, backgroundColor: colors.border, marginTop: 24, overflow: 'hidden' },
+    largeProgressFill: { height: '100%', backgroundColor: colors.accent, borderRadius: 3 },
 
-  contentSection: { gap: 12 },
-  contentHeader:  { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  backBtn: { width: 34, height: 34, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' },
-  contentTitle: { fontSize: 16, fontWeight: '700', color: '#FFFFFF', letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    doneBanner: { backgroundColor: isDark ? 'rgba(52,199,138,0.08)' : '#ECFDF5', borderRadius: 16, borderWidth: 1, borderColor: isDark ? 'rgba(52,199,138,0.2)' : '#D1FAE5', padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+    doneBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+    doneIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: isDark ? 'rgba(52,199,138,0.12)' : '#D1FAE5', alignItems: 'center', justifyContent: 'center' },
+    doneBannerTitle: { fontSize: 14, fontWeight: '600', color: colors.success, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    doneBannerSub:   { fontSize: 11, color: isDark ? 'rgba(52,199,138,0.6)' : '#059669', marginTop: 1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
 
-  hintRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 },
-  hintText: { fontSize: 11, color: 'rgba(255,255,255,0.25)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    outputGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+    outputCard: { width: (SW - 48 - 10) / 2, backgroundColor: colors.cardBg, borderRadius: 18, borderWidth: 1, borderColor: colors.border, padding: 16, gap: 6 },
+    outputCardLocked: { backgroundColor: isDark ? 'rgba(255,255,255,0.01)' : colors.background, borderColor: isDark ? 'rgba(255,255,255,0.03)' : colors.border },
+    outputCardTop:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+    outputIconWrap: { width: 40, height: 40, borderRadius: 12, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, alignItems: 'center', justifyContent: 'center' },
+    outputIconWrapLocked: { backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : colors.border, borderColor: 'transparent' },
+    outputCardLabel:{ fontSize: 15, fontWeight: '700', color: colors.text, letterSpacing: -0.2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    outputCardLabelLocked: { color: colors.textDim },
+    outputCardDesc: { fontSize: 11, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    outputCardCount:{ alignSelf: 'flex-start', marginTop: 4, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+    outputCardCountText: { fontSize: 10, fontWeight: '600', color: colors.accent, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
-  summaryBox: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 18 },
-  summaryText: { fontSize: 14, color: 'rgba(255,255,255,0.78)', lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    generatingOverlay: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(155,81,224,0.3)', padding: 30, alignItems: 'center', gap: 10, marginTop: 10 },
+    generatingText: { color: colors.text, fontSize: 16, fontWeight: '700', marginTop: 10 },
+    generatingSubText: { color: colors.textDim, fontSize: 12 },
 
-  conceptsList: { gap: 10 },
-  conceptItem:  { flexDirection: 'row', gap: 12, backgroundColor: CARD_BG, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 14 },
-  conceptDot:   { width: 8, height: 8, borderRadius: 4, backgroundColor: ACCENT, marginTop: 5, flexShrink: 0 },
-  conceptContent: { flex: 1, gap: 4 },
-  conceptTerm:  { fontSize: 14, fontWeight: '600', color: '#FFFFFF', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  conceptDef:   { fontSize: 13, color: 'rgba(255,255,255,0.55)', lineHeight: 19, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    contentSection: { gap: 12 },
+    contentHeader:  { flexDirection: 'row', alignItems: 'center', gap: 12 },
+    backBtn: { width: 34, height: 34, borderRadius: 10, backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : colors.cardBg, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
+    contentTitle: { fontSize: 16, fontWeight: '700', color: colors.text, letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
 
-  flashList: { gap: 12 },
-  flashCard: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: ACCENT_BORDER, padding: 20, gap: 10, alignItems: 'center', minHeight: 140, justifyContent: 'center' },
-  flashCardFlipped: { backgroundColor: 'rgba(59,111,212,0.08)' },
-  flashCardHint: { fontSize: 10, fontWeight: '600', color: ACCENT, letterSpacing: 1, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  flashCardText: { fontSize: 15, color: '#FFFFFF', textAlign: 'center', lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  flashCardTap:  { fontSize: 11, color: 'rgba(255,255,255,0.2)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    hintRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 },
+    hintText: { fontSize: 11, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
 
-  quizList: { gap: 14 },
-  quizCard: { backgroundColor: CARD_BG, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', padding: 16, gap: 12 },
-  quizQuestion: { fontSize: 14, fontWeight: '600', color: '#FFFFFF', lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  quizOptions:  { gap: 8 },
-  quizOption:   { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 10, borderWidth: 1 },
-  quizOptionLetter: { fontSize: 12, fontWeight: '700', width: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 10, padding: 10 },
-  quizExplanationText: { fontSize: 12, color: 'rgba(255,255,255,0.45)', flex: 1, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-});
+    summaryBox: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 18 },
+    summaryText: { fontSize: 14, color: colors.text, lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+    conceptsList: { gap: 10 },
+    conceptItem:  { flexDirection: 'row', gap: 12, backgroundColor: colors.cardBg, borderRadius: 14, borderWidth: 1, borderColor: colors.border, padding: 14 },
+    conceptDot:   { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.accent, marginTop: 5, flexShrink: 0 },
+    conceptContent: { flex: 1, gap: 4 },
+    conceptTerm:  { fontSize: 14, fontWeight: '600', color: colors.text, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    conceptDef:   { fontSize: 13, color: colors.textDim, lineHeight: 19, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+    flashList: { gap: 12 },
+    flashCard: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 20, gap: 10, alignItems: 'center', minHeight: 140, justifyContent: 'center' },
+    flashCardFlipped: { backgroundColor: colors.accentDim },
+    flashCardHint: { fontSize: 10, fontWeight: '600', color: colors.accent, letterSpacing: 1, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    flashCardText: { fontSize: 15, color: colors.text, textAlign: 'center', lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    flashCardTap:  { fontSize: 11, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+    quizList: { gap: 14 },
+    quizCard: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 16, gap: 12 },
+    quizQuestion: { fontSize: 14, fontWeight: '600', color: colors.text, lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    quizOptions:  { gap: 8 },
+    quizOption:   { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 10, borderWidth: 1 },
+    quizOptionLetter: { fontSize: 12, fontWeight: '700', width: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : colors.background, borderRadius: 10, padding: 10 },
+    quizExplanationText: { fontSize: 12, color: colors.textDim, flex: 1, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+  });
+};

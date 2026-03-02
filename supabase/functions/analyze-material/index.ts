@@ -1,10 +1,8 @@
-// supabase/functions/analyze-material/index.ts//
-//@ts-nocheck
-//@ts-ignore
+// @ts-nocheck
+// supabase/functions/analyze-material/index.ts
+
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-//@ts-ignore
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-//@ts-ignore
 import { encodeBase64 } from "https://deno.land/std@0.208.0/encoding/base64.ts";
 
 const corsHeaders = {
@@ -48,7 +46,7 @@ Rules:
 - CRITICAL: Keep all definitions, answers, and explanations to a MAXIMUM of 15 words. Be extremely brief and concise.
 - Return ONLY valid JSON, no markdown, no extra text`;
 
-// ── LlamaParse Document extraction (Handles both PDF and DOCX) ───────────────
+// ── LlamaParse Document extraction (Handles PDF, DOCX, and PPTX) ───────────────
 async function extractWithLlamaParse(bytes: Uint8Array, fileName: string, mimeType: string, apiKey: string): Promise<string> {
   const formData = new FormData();
   const blob = new Blob([bytes], { type: mimeType });
@@ -74,7 +72,7 @@ async function extractWithLlamaParse(bytes: Uint8Array, fileName: string, mimeTy
 
   let status = 'PENDING';
   let attempts = 0;
-  while (status !== 'SUCCESS' && status !== 'ERROR' && attempts < 30) {
+  while (status !== 'SUCCESS' && status !== 'ERROR' && attempts < 60) {
     await new Promise(r => setTimeout(r, 2000));
     const statusRes = await fetch(`https://api.cloud.llamaindex.ai/api/parsing/job/${jobId}`, {
       headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -162,20 +160,17 @@ serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
   try {
-    const { storagePath, fileName } = await req.json(); // We no longer blindly trust the frontend's userId!
-    console.log('Request:', { storagePath, fileName });
-
+    const { storagePath, fileName } = await req.json(); 
     if (!storagePath) {
       return new Response(JSON.stringify({ success: false, error: 'Missing storagePath' }),
-        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
-    // --- SECURE IDENTITY VERIFICATION ---
+    // --- 1. SECURE IDENTITY VERIFICATION ---
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) throw new Error('Missing Authorization header. You must be logged in.');
     const token = authHeader.replace('Bearer ', '');
 
-    // We use the ANON key to securely decode and verify the JWT Token
     const supabaseSecure = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_ANON_KEY')!
@@ -183,21 +178,50 @@ serve(async (req) => {
 
     const { data: { user }, error: authError } = await supabaseSecure.auth.getUser(token);
     if (authError || !user) throw new Error('Unauthorized: Invalid or expired session token.');
-
-    // We now have cryptographically guaranteed proof of who this user is.
     const verifiedUserId = user.id;
-    // ------------------------------------
 
-    const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-    const GROQ_API_KEY   = Deno.env.get('GROQ_API_KEY');
-
-    // Initialize admin client to bypass RLS for edge function processing
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     );
 
-    // 1. Download
+    // --- 2. SERVER-SIDE QUOTA CHECK ---
+    const today = new Date().toISOString().split('T')[0]; // Gets current date YYYY-MM-DD
+    
+    // Fetch user's quota record
+    const { data: quotaData, error: quotaError } = await supabaseAdmin
+      .from('user_quotas')
+      .select('*')
+      .eq('user_id', verifiedUserId)
+      .single();
+
+    let uploadsToday = 0;
+
+    // If a record exists, check if we need to reset it for a new day
+    if (quotaData) {
+      if (quotaData.last_reset_date !== today) {
+        uploadsToday = 0; // It's a new day!
+      } else {
+        uploadsToday = quotaData.uploads_today;
+      }
+    }
+
+    // BLOCK THE REQUEST IF OVER LIMIT (3 uploads)
+    if (uploadsToday >= 3) {
+      return new Response(
+        JSON.stringify({ 
+          success: false, 
+          errorType: 'quota_exceeded', 
+          error: 'Daily limit reached. Please come back tomorrow!' 
+        }),
+        { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
+    const GROQ_API_KEY   = Deno.env.get('GROQ_API_KEY');
+
+    // --- 3. DOWNLOAD & PROCESS (Same as before) ---
     console.log('Downloading...');
     const { data: fileData, error: downloadError } = await supabaseAdmin.storage
       .from('study-materials').download(storagePath);
@@ -205,31 +229,33 @@ serve(async (req) => {
 
     const arrayBuffer = await fileData.arrayBuffer();
     const fileBytes   = new Uint8Array(arrayBuffer);
-    console.log('Size:', fileBytes.length);
 
-    const isPdf    = fileName.toLowerCase().endsWith('.pdf');
-    const mimeType = isPdf ? 'application/pdf'
-      : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const ext = fileName.toLowerCase().split('.').pop();
+    let isPdf = false;
+    let mimeType = 'application/octet-stream';
 
-    // 2. Base64 for Gemini (Safer encoding method)
+    if (ext === 'pdf') {
+      isPdf = true;
+      mimeType = 'application/pdf';
+    } else if (ext === 'docx') {
+      mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    } else if (ext === 'pptx') {
+      mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    } else if (ext === 'ppt') {
+      mimeType = 'application/vnd.ms-powerpoint';
+    } else {
+      throw new Error(`Unsupported file type: .${ext}. Please upload a PDF, DOCX, or PPTX.`);
+    }
+
     const base64 = encodeBase64(fileBytes);
-
-    // 3. Try Gemini (ONLY if it is a PDF!)
     let rawText: string | null = null;
+    
     if (GEMINI_API_KEY && isPdf) {
       rawText = await tryGemini(base64, mimeType, GEMINI_API_KEY);
     }
 
-    // 4. Fallback to Groq with LlamaParse extraction (Handles both PDF & DOCX)
     if (!rawText && GROQ_API_KEY) {
-      if (isPdf) {
-        console.log('Gemini failed — falling back to LlamaParse + Groq...');
-      } else {
-        console.log('DOCX detected — skipping Gemini, routing directly to LlamaParse + Groq...');
-      }
-
       const LLAMAPARSE_API_KEY = Deno.env.get('LLAMAPARSE_API_KEY');
-      
       let extracted = '';
       if (LLAMAPARSE_API_KEY) {
         try {
@@ -238,17 +264,14 @@ serve(async (req) => {
           console.error('LlamaParse error:', e.message);
         }
       }
-
       if (!extracted || extracted.length < 50) {
-        throw new Error('Could not extract readable text from this file. Please try a different PDF or DOCX file.');
+        throw new Error('Could not extract readable text from this file. Please try a different PDF, DOCX, or PPTX file.');
       }
-
       rawText = await tryGroq(extracted, GROQ_API_KEY);
     }
 
     if (!rawText) throw new Error('All AI providers failed. Check your API keys in Supabase Secrets.');
 
-    // 5. Parse
     let analysisResult: any;
     try {
       const cleaned = rawText.replace(/```json|```/g, '').trim();
@@ -257,9 +280,10 @@ serve(async (req) => {
       throw new Error(`Failed to parse AI response: ${e.message}`);
     }
 
-    // 6. Save to Supabase DB using the verified user ID
+    // --- 4. RECORD SUCCESS & INCREMENT QUOTA ---
+    // Save to study_results table
     const { error: dbError } = await supabaseAdmin.from('study_results').insert({
-      user_id: verifiedUserId, // SECURITY FIX: using cryptographically verified ID
+      user_id: verifiedUserId, 
       file_name: fileName, 
       storage_path: storagePath,
       summary: analysisResult.summary, 
@@ -268,8 +292,14 @@ serve(async (req) => {
       quiz: analysisResult.quiz,
       hard_quiz: analysisResult.hardQuiz,
     });
-    
     if (dbError) console.error('DB error:', dbError.message);
+
+    // Update the Quota Table (+1 upload)
+    await supabaseAdmin.from('user_quotas').upsert({
+      user_id: verifiedUserId,
+      uploads_today: uploadsToday + 1,
+      last_reset_date: today
+    });
 
     return new Response(
       JSON.stringify({
@@ -287,7 +317,7 @@ serve(async (req) => {
     console.error('FATAL:', err.message);
     return new Response(
       JSON.stringify({ success: false, error: err.message ?? 'Internal server error' }),
-      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
 });

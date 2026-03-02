@@ -9,6 +9,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext'; // <-- NEW IMPORT
 
 const { width } = Dimensions.get('window');
 
@@ -29,27 +30,15 @@ interface ToastConfig {
 }
 
 function Toast({ config, onHide }: { config: ToastConfig; onHide: () => void }) {
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
   const translateY = useRef(new Animated.Value(-120)).current;
   const opacity = useRef(new Animated.Value(0)).current;
   const progress = useRef(new Animated.Value(1)).current;
 
-  const iconMap: Record<ToastType, string> = {
-    success: '✓',
-    error: '✕',
-    info: 'i',
-  };
-
-  const colorMap: Record<ToastType, string> = {
-    success: '#4FD1C5',
-    error: '#FF5252',
-    info: 'rgba(255,255,255,0.5)',
-  };
-
-  const bgMap: Record<ToastType, string> = {
-    success: 'rgba(79,209,197,0.1)',
-    error: 'rgba(255,82,82,0.1)',
-    info: 'rgba(255,255,255,0.05)',
-  };
+  const iconMap: Record<ToastType, string> = { success: '✓', error: '✕', info: 'i' };
+  const colorMap: Record<ToastType, string> = { success: colors.success, error: colors.danger, info: colors.accent };
+  const bgMap: Record<ToastType, string> = { success: colors.success + '1A', error: colors.danger + '1A', info: colors.accentDim };
 
   useEffect(() => {
     Animated.parallel([
@@ -72,24 +61,26 @@ function Toast({ config, onHide }: { config: ToastConfig; onHide: () => void }) 
   const accentColor = colorMap[config.type];
   const bgColor = bgMap[config.type];
   const icon = iconMap[config.type];
-
   const progressWidth = progress.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
   return (
-    <Animated.View style={[styles.toast, { transform: [{ translateY }], opacity }]}>
-      <View style={[styles.toastAccentBar, { backgroundColor: accentColor }]} />
-      <View style={[styles.toastIconWrap, { backgroundColor: bgColor }]}>
-        <Text style={[styles.toastIcon, { color: accentColor }]}>{icon}</Text>
+    <Animated.View style={[
+      { position: 'absolute', top: Platform.OS === 'ios' ? 56 : 40, left: 16, right: 16, backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingRight: 14, overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 8 }, shadowOpacity: isDark ? 0.4 : 0.1, shadowRadius: 20, elevation: 20, zIndex: 9999 },
+      { transform: [{ translateY }], opacity }
+    ]}>
+      <View style={[{ width: 4, alignSelf: 'stretch', borderRadius: 2, marginRight: 12, marginLeft: 4 }, { backgroundColor: accentColor }]} />
+      <View style={[{ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginRight: 12 }, { backgroundColor: bgColor }]}>
+        <Text style={[{ fontSize: 14, fontWeight: '700' }, { color: accentColor }]}>{icon}</Text>
       </View>
-      <View style={styles.toastTextWrap}>
-        <Text style={styles.toastTitle}>{config.title}</Text>
-        <Text style={styles.toastMessage}>{config.message}</Text>
+      <View style={{ flex: 1 }}>
+        <Text style={{ fontSize: 14, fontWeight: '700', color: colors.text, marginBottom: 2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) }}>{config.title}</Text>
+        <Text style={{ fontSize: 12, color: colors.textDim, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) }}>{config.message}</Text>
       </View>
-      <TouchableOpacity style={styles.toastClose} onPress={onHide}>
-        <Text style={styles.toastCloseText}>✕</Text>
+      <TouchableOpacity style={{ width: 24, height: 24, alignItems: 'center', justifyContent: 'center', marginLeft: 8 }} onPress={onHide}>
+        <Text style={{ color: colors.textDim, fontSize: 11, fontWeight: '700' }}>✕</Text>
       </TouchableOpacity>
-      <View style={styles.toastProgressTrack}>
-        <Animated.View style={[styles.toastProgressBar, { backgroundColor: accentColor, width: progressWidth }]} />
+      <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 2, backgroundColor: colors.border }}>
+        <Animated.View style={[{ height: 2, borderRadius: 1 }, { backgroundColor: accentColor, width: progressWidth }]} />
       </View>
     </Animated.View>
   );
@@ -97,6 +88,10 @@ function Toast({ config, onHide }: { config: ToastConfig; onHide: () => void }) 
 
 // ─── Main Screen ─────────────────────────────────────────────────────────────
 export default function LoginScreen() {
+  const styles = useStyles(); // <-- NEW: Dynamic Styles
+  const { theme, colors } = useTheme();
+  const isDark = theme === 'dark';
+  
   const navigation = useNavigation<LoginScreenNavigationProp>();
   const { signIn, signUp, user } = useAuth();
 
@@ -108,7 +103,6 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-
   const [toast, setToast] = useState<ToastConfig | null>(null);
 
   const showToast = useCallback((config: ToastConfig) => {
@@ -160,33 +154,22 @@ export default function LoginScreen() {
 
   const handleSubmit = async () => {
     if (!studentId.trim() || !password.trim()) {
-      showToast({ type: 'error', title: 'Missing fields', message: 'Please fill in all required fields.' });
-      return;
+      showToast({ type: 'error', title: 'Missing fields', message: 'Please fill in all required fields.' }); return;
     }
     if (isSignUp && (!firstName.trim() || !lastName.trim())) {
-      showToast({ type: 'error', title: 'Missing fields', message: 'Please enter your first and last name.' });
-      return;
+      showToast({ type: 'error', title: 'Missing fields', message: 'Please enter your first and last name.' }); return;
     }
     if (password.length < 6) {
-      showToast({ type: 'error', title: 'Weak password', message: 'Password must be at least 6 characters.' });
-      return;
+      showToast({ type: 'error', title: 'Weak password', message: 'Password must be at least 6 characters.' }); return;
     }
 
     const email = `${studentId.trim()}@studia.app`;
-
     try {
       setIsLoading(true);
       if (isSignUp) {
         await signUp(email, password, firstName.trim(), lastName.trim(), studentId.trim());
-        showToast({
-          type: 'success',
-          title: 'Account created!',
-          message: 'Welcome to Studia. You can now sign in.',
-        });
-        setIsSignUp(false);
-        setPassword('');
-        setFirstName('');
-        setLastName('');
+        showToast({ type: 'success', title: 'Account created!', message: 'Welcome to Studia. You can now sign in.' });
+        setIsSignUp(false); setPassword(''); setFirstName(''); setLastName('');
       } else {
         await signIn(email, password);
       }
@@ -206,7 +189,7 @@ export default function LoginScreen() {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" />
+      <StatusBar barStyle={isDark ? "light-content" : "dark-content"} />
       <View style={styles.radialGlow} />
 
       {toast && <Toast config={toast} onHide={() => setToast(null)} />}
@@ -252,42 +235,41 @@ export default function LoginScreen() {
                   <View style={styles.nameRow}>
                     <View style={[styles.fieldWrap, { flex: 1 }]}>
                       <Text style={styles.fieldLabel}>First Name</Text>
-                      <TextInput style={styles.fieldInput} placeholder="Juan" placeholderTextColor="rgba(255,255,255,0.18)" value={firstName} onChangeText={setFirstName} autoCapitalize="words" />
+                      <TextInput style={styles.fieldInput} placeholder="Juan" placeholderTextColor={colors.textDim} value={firstName} onChangeText={setFirstName} autoCapitalize="words" />
                     </View>
                     <View style={[styles.fieldWrap, { flex: 1 }]}>
                       <Text style={styles.fieldLabel}>Last Name</Text>
-                      <TextInput style={styles.fieldInput} placeholder="Dela Cruz" placeholderTextColor="rgba(255,255,255,0.18)" value={lastName} onChangeText={setLastName} autoCapitalize="words" />
+                      <TextInput style={styles.fieldInput} placeholder="Dela Cruz" placeholderTextColor={colors.textDim} value={lastName} onChangeText={setLastName} autoCapitalize="words" />
                     </View>
                   </View>
                 )}
 
                 <View style={styles.fieldWrap}>
                   <Text style={styles.fieldLabel}>Student ID</Text>
-                  <TextInput style={styles.fieldInput} placeholder="2026123456" placeholderTextColor="rgba(255,255,255,0.18)" value={studentId} onChangeText={setStudentId} autoCapitalize="none" autoCorrect={false} />
+                  <TextInput style={styles.fieldInput} placeholder="2026123456" placeholderTextColor={colors.textDim} value={studentId} onChangeText={setStudentId} autoCapitalize="none" autoCorrect={false} />
                 </View>
 
-                {/* ── PASSWORD FIELD WITH TOGGLE ── */}
                 <View style={styles.fieldWrap}>
                   <Text style={styles.fieldLabel}>Password</Text>
                   <View style={styles.passwordContainer}>
                     <TextInput
                       style={styles.passwordInput}
                       placeholder={isSignUp ? 'Min. 6 characters' : 'Enter your password'}
-                      placeholderTextColor="rgba(255,255,255,0.18)"
+                      placeholderTextColor={colors.textDim}
                       value={password}
                       onChangeText={setPassword}
                       secureTextEntry={!showPassword}
                       autoCapitalize="none"
                     />
                     <TouchableOpacity style={styles.eyeBtn} onPress={() => setShowPassword(!showPassword)} activeOpacity={0.7}>
-                      <Feather name={showPassword ? "eye" : "eye-off"} size={18} color="rgba(255,255,255,0.4)" />
+                      <Feather name={showPassword ? "eye" : "eye-off"} size={18} color={colors.textDim} />
                     </TouchableOpacity>
                   </View>
                 </View>
               </View>
 
               <TouchableOpacity style={[styles.submitBtn, isLoading && { opacity: 0.6 }]} onPress={handleSubmit} activeOpacity={0.75} disabled={isLoading}>
-                {isLoading ? <ActivityIndicator size="small" color="#0E1117" /> : <Text style={styles.submitBtnText}>{isSignUp ? 'Create account' : 'Continue'}</Text>}
+                {isLoading ? <ActivityIndicator size="small" color={isDark ? "#0E1117" : "#FFFFFF"} /> : <Text style={styles.submitBtnText}>{isSignUp ? 'Create account' : 'Continue'}</Text>}
               </TouchableOpacity>
 
               <View style={styles.formFooter}>
@@ -306,53 +288,47 @@ export default function LoginScreen() {
   );
 }
 
-// ─── Styles ──────────────────────────────────────────────────────────────────
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0E1117', justifyContent: 'center', alignItems: 'center' },
-  radialGlow: { position: 'absolute', width: width * 1.1, height: width * 1.1, borderRadius: width * 0.55, backgroundColor: 'rgba(90,120,160,0.06)', alignSelf: 'center' },
+// --- NEW: DYNAMIC STYLES ---
+const useStyles = () => {
+  const { colors, theme } = useTheme();
+  const isDark = theme === 'dark';
 
-  toast: { position: 'absolute', top: Platform.OS === 'ios' ? 56 : 40, left: 16, right: 16, backgroundColor: '#1E2330', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingRight: 14, overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.4, shadowRadius: 20, elevation: 20, zIndex: 9999 },
-  toastAccentBar: { width: 4, alignSelf: 'stretch', borderRadius: 2, marginRight: 12, marginLeft: 4 },
-  toastIconWrap: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
-  toastIcon: { fontSize: 14, fontWeight: '700' },
-  toastTextWrap: { flex: 1 },
-  toastTitle: { fontSize: 14, fontWeight: '700', color: '#FFFFFF', marginBottom: 2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  toastMessage: { fontSize: 12, color: 'rgba(255,255,255,0.45)', lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  toastClose: { width: 24, height: 24, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
-  toastCloseText: { color: 'rgba(255,255,255,0.25)', fontSize: 11, fontWeight: '700' },
-  toastProgressTrack: { position: 'absolute', bottom: 0, left: 0, right: 0, height: 2, backgroundColor: 'rgba(255,255,255,0.05)' },
-  toastProgressBar: { height: 2, borderRadius: 1 },
+  return StyleSheet.create({
+    container: { flex: 1, backgroundColor: colors.background, justifyContent: 'center', alignItems: 'center' },
+    radialGlow: { position: 'absolute', width: width * 1.1, height: width * 1.1, borderRadius: width * 0.55, backgroundColor: colors.accentDim, alignSelf: 'center' },
 
-  hero: { alignItems: 'center', gap: 14 },
-  wordmark: { fontSize: 96, fontWeight: '700', color: '#FFFFFF', letterSpacing: -4, textAlign: 'center', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-  subtitle: { fontSize: 15, fontWeight: '400', color: 'rgba(255,255,255,0.42)', textAlign: 'center', letterSpacing: 0.2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  loginBtn: { marginTop: 6, paddingVertical: 11, paddingHorizontal: 26, borderRadius: 100, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', backgroundColor: 'rgba(255,255,255,0.05)' },
-  loginBtnText: { fontSize: 14, fontWeight: '500', color: 'rgba(255,255,255,0.78)', letterSpacing: 0.1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  legalText: { position: 'absolute', bottom: Platform.OS === 'ios' ? 44 : 28, fontSize: 11, color: 'rgba(255,255,255,0.16)', textAlign: 'center', paddingHorizontal: 40, lineHeight: 16 },
+    hero: { alignItems: 'center', gap: 14 },
+    wordmark: { fontSize: 96, fontWeight: '700', color: colors.text, letterSpacing: -4, textAlign: 'center', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
+    subtitle: { fontSize: 15, fontWeight: '400', color: colors.textDim, textAlign: 'center', letterSpacing: 0.2, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    loginBtn: { marginTop: 6, paddingVertical: 11, paddingHorizontal: 26, borderRadius: 100, borderWidth: 1, borderColor: isDark ? 'rgba(255,255,255,0.2)' : colors.border, backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : colors.cardBg },
+    loginBtnText: { fontSize: 14, fontWeight: '500', color: colors.text, letterSpacing: 0.1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    legalText: { position: 'absolute', bottom: Platform.OS === 'ios' ? 44 : 28, fontSize: 11, color: isDark ? 'rgba(255,255,255,0.16)' : colors.textDim, textAlign: 'center', paddingHorizontal: 40, lineHeight: 16 },
 
-  modalWrapper: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 },
-  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.68)' },
-  formCard: { width: '100%', backgroundColor: '#181C25', borderRadius: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)', paddingHorizontal: 24, paddingTop: 24, paddingBottom: 28, shadowColor: '#000', shadowOffset: { width: 0, height: 24 }, shadowOpacity: 0.55, shadowRadius: 48, elevation: 24 },
-  formHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
-  formTitle: { fontSize: 20, fontWeight: '600', color: '#FFFFFF', letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  formSubtitle: { fontSize: 13, color: 'rgba(255,255,255,0.36)', marginTop: 3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  closeBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.07)', alignItems: 'center', justifyContent: 'center', marginTop: 2 },
-  closeBtnText: { color: 'rgba(255,255,255,0.38)', fontSize: 11, fontWeight: '700' },
-  divider: { height: 1, backgroundColor: 'rgba(255,255,255,0.06)', marginVertical: 20 },
-  fields: { gap: 16, marginBottom: 26 },
-  nameRow: { flexDirection: 'row', gap: 12 },
-  fieldWrap: { gap: 7 },
-  fieldLabel: { fontSize: 11, fontWeight: '600', color: 'rgba(255,255,255,0.32)', letterSpacing: 0.8, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  fieldInput: { backgroundColor: 'rgba(255,255,255,0.04)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 10, paddingVertical: 13, paddingHorizontal: 15, color: '#FFFFFF', fontSize: 15, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  
-  // New Password Wrapper Styles
-  passwordContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.04)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 10 },
-  passwordInput: { flex: 1, paddingVertical: 13, paddingHorizontal: 15, color: '#FFFFFF', fontSize: 15, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  eyeBtn: { padding: 13 },
+    modalWrapper: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 },
+    overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.68)' },
+    formCard: { width: '100%', backgroundColor: colors.cardBg, borderRadius: 20, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 24, paddingTop: 24, paddingBottom: 28, shadowColor: '#000', shadowOffset: { width: 0, height: 24 }, shadowOpacity: isDark ? 0.55 : 0.1, shadowRadius: 48, elevation: 24 },
+    
+    formHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
+    formTitle: { fontSize: 20, fontWeight: '600', color: colors.text, letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    formSubtitle: { fontSize: 13, color: colors.textDim, marginTop: 3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    closeBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: isDark ? 'rgba(255,255,255,0.07)' : colors.background, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
+    closeBtnText: { color: colors.textDim, fontSize: 11, fontWeight: '700' },
+    divider: { height: 1, backgroundColor: colors.border, marginVertical: 20 },
+    
+    fields: { gap: 16, marginBottom: 26 },
+    nameRow: { flexDirection: 'row', gap: 12 },
+    fieldWrap: { gap: 7 },
+    fieldLabel: { fontSize: 11, fontWeight: '600', color: colors.textDim, letterSpacing: 0.8, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    fieldInput: { backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : colors.background, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingVertical: 13, paddingHorizontal: 15, color: colors.text, fontSize: 15, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    
+    passwordContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : colors.background, borderWidth: 1, borderColor: colors.border, borderRadius: 10 },
+    passwordInput: { flex: 1, paddingVertical: 13, paddingHorizontal: 15, color: colors.text, fontSize: 15, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    eyeBtn: { padding: 13 },
 
-  submitBtn: { backgroundColor: 'rgba(255,255,255,0.9)', paddingVertical: 15, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  submitBtnText: { fontSize: 15, fontWeight: '600', color: '#0E1117', letterSpacing: 0.1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
-  formFooter: { alignItems: 'center', marginTop: 16 },
-  toggleText: { fontSize: 13, color: 'rgba(255,255,255,0.32)', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-  toggleLink: { color: 'rgba(255,255,255,0.65)', fontWeight: '600' },
-});
+    submitBtn: { backgroundColor: colors.text, paddingVertical: 15, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+    submitBtnText: { fontSize: 15, fontWeight: '600', color: colors.background, letterSpacing: 0.1, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    formFooter: { alignItems: 'center', marginTop: 16 },
+    toggleText: { fontSize: 13, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    toggleLink: { color: colors.text, fontWeight: '600' },
+  });
+};
