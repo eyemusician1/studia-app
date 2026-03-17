@@ -7,18 +7,45 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext'; // <-- NEW IMPORT
+import { migrateHistoryOnce } from '../lib/historyStorage';
 
 const ACCENT        = '#3B6FD4';
+
+type QuizItem = { question: string; options: string[]; correctIndex: number; explanation: string };
+type IdItem = { question: string; expectedAnswer: string };
+type EnumItem = { question: string; items: string[] };
+type ShortItem = { question: string; guidance: string };
+type QuantItem = { problem: string; stepSolution: string; finalAnswer: string };
+type ExamBundle = {
+  multipleChoice: QuizItem[];
+  identification: IdItem[];
+  enumeration: EnumItem[];
+  shortAnswer: ShortItem[];
+  quantitative: QuantItem[];
+};
+
+function countExamItems(exam: unknown): number {
+  if (!exam) return 0;
+  if (Array.isArray(exam)) return exam.length;
+  if (typeof exam !== 'object') return 0;
+  const e = exam as Partial<ExamBundle>;
+  return (
+    (Array.isArray(e.multipleChoice) ? e.multipleChoice.length : 0) +
+    (Array.isArray(e.identification) ? e.identification.length : 0) +
+    (Array.isArray(e.enumeration) ? e.enumeration.length : 0) +
+    (Array.isArray(e.shortAnswer) ? e.shortAnswer.length : 0) +
+    (Array.isArray(e.quantitative) ? e.quantitative.length : 0)
+  );
+}
 
 export default function ProfileScreen() {
   const styles = useStyles(); // <-- NEW: Dynamic Styles
   const { theme, colors } = useTheme();
   const { profile, user } = useAuth();
   
-  const [stats, setStats] = useState({ totalDocs: 0, totalFlashcards: 0, totalQuizzes: 0, totalConcepts: 0 });
+  const [stats, setStats] = useState({ totalDocs: 0, totalFlashcards: 0, totalQuizzes: 0, totalConcepts: 0, totalExamItems: 0 });
   const [loading, setLoading] = useState(true);
   const [greeting, setGreeting] = useState('Welcome back');
 
@@ -37,25 +64,26 @@ export default function ProfileScreen() {
   );
 
   const fetchOfflineStats = async () => {
+    setLoading(true);
     try {
-      const localData = await AsyncStorage.getItem('@studia_history');
-      if (localData) {
-        const history = JSON.parse(localData);
-        let fCount = 0; let qCount = 0; let cCount = 0;
+      const history = await migrateHistoryOnce();
+      if (history.length > 0) {
+        let fCount = 0; let qCount = 0; let cCount = 0; let examCount = 0;
         history.forEach((item: any) => {
           fCount += item.content?.flashcards?.length || 0;
           qCount += (item.content?.quiz?.length || 0) + (item.content?.hardQuiz?.length || 0);
           cCount += item.content?.keyConceptsList?.length || 0;
+          examCount += countExamItems(item.content?.exam);
         });
-        setStats({ totalDocs: history.length, totalFlashcards: fCount, totalQuizzes: qCount, totalConcepts: cCount });
+        setStats({ totalDocs: history.length, totalFlashcards: fCount, totalQuizzes: qCount, totalConcepts: cCount, totalExamItems: examCount });
       } else {
-        setStats({ totalDocs: 0, totalFlashcards: 0, totalQuizzes: 0, totalConcepts: 0 });
+        setStats({ totalDocs: 0, totalFlashcards: 0, totalQuizzes: 0, totalConcepts: 0, totalExamItems: 0 });
       }
     } catch (error) { console.error("Failed to fetch profile stats:", error); }
     setLoading(false);
   };
 
-  const totalXP = (stats.totalDocs * 50) + (stats.totalFlashcards * 5) + (stats.totalQuizzes * 10);
+  const totalXP = (stats.totalDocs * 50) + (stats.totalFlashcards * 5) + (stats.totalQuizzes * 10) + (stats.totalExamItems * 8);
   const currentLevel = Math.floor(totalXP / 500) + 1;
   const xpIntoCurrentLevel = totalXP % 500;
   const xpProgress = (xpIntoCurrentLevel / 500) * 100;
@@ -65,6 +93,7 @@ export default function ProfileScreen() {
     { label: 'Flashcards', value: stats.totalFlashcards, icon: 'layers' },
     { label: 'Quiz items', value: stats.totalQuizzes,    icon: 'check-square' },
     { label: 'Concepts',   value: stats.totalConcepts,   icon: 'tag' },
+    { label: 'Exam items', value: stats.totalExamItems,  icon: 'award' },
   ];
 
   const handleBadgeTap = (badge: any) => {

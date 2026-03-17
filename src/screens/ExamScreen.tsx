@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, StatusBar,
   Platform, Animated, Easing, ActivityIndicator, ScrollView, Dimensions,
-  Alert, Image
+  Image
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
@@ -15,6 +15,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { decode } from 'base64-arraybuffer';
 import { useTheme } from '../context/ThemeContext';
 import LottieView from 'lottie-react-native'; // <-- Lottie Imported Here
+import AppToast, { ToastType } from '../components/AppToast';
+import { migrateHistoryOnce, prependHistoryEntry } from '../lib/historyStorage';
 
 const ACCENT        = '#9B51E0'; // Purple accent 
 const ACCENT_DIM    = 'rgba(155,81,224,0.10)';
@@ -24,6 +26,11 @@ const SW            = Dimensions.get('window').width;
 type PickedFile  = { name: string; uri: string; size: number; mimeType: string };
 type UploadState = 'idle' | 'uploading' | 'analyzing' | 'done' | 'error';
 type ExamItem    = { question: string; options: string[]; correctIndex: number; explanation: string };
+type IdItem      = { question: string; expectedAnswer: string };
+type EnumItem    = { question: string; items: string[] };
+type ShortItem   = { question: string; guidance: string };
+type QuantItem   = { problem: string; stepSolution: string; finalAnswer: string };
+type ExamBundle  = { multipleChoice: ExamItem[]; identification: IdItem[]; enumeration: EnumItem[]; shortAnswer: ShortItem[]; quantitative: QuantItem[] };
 
 function formatBytes(b: number) {
   if (b < 1024) return `${b} B`;
@@ -37,7 +44,68 @@ const parseQuotaValue = (value: string | null): number => {
   return Number.isFinite(numeric) ? numeric : 0;
 };
 
-function ExamCard({ item, index }: { item: ExamItem; index: number }) {
+const cleanExamItems = (raw: any): ExamBundle | null => {
+  const cleanMcq = (arr: any): ExamItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({
+        question: (q?.question ?? '').trim(),
+        options: Array.isArray(q?.options) ? q.options.map((o: any) => (typeof o === 'string' ? o.trim() : '')).slice(0, 4) : [],
+        correctIndex: typeof q?.correctIndex === 'number' ? q.correctIndex : -1,
+        explanation: (q?.explanation ?? '').trim(),
+      }))
+      .filter((q) => q.question && q.explanation && q.options.length === 4 && q.correctIndex >= 0 && q.correctIndex < 4);
+  };
+  const cleanId = (arr: any): IdItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({ question: (q?.question ?? '').trim(), expectedAnswer: (q?.expectedAnswer ?? '').trim() }))
+      .filter((q) => q.question && q.expectedAnswer);
+  };
+  const cleanEnum = (arr: any): EnumItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({ question: (q?.question ?? '').trim(), items: Array.isArray(q?.items) ? q.items.map((i: any) => (typeof i === 'string' ? i.trim() : '')).filter((i: string) => i) : [] }))
+      .filter((q) => q.question && q.items.length >= 3);
+  };
+  const cleanShort = (arr: any): ShortItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({ question: (q?.question ?? '').trim(), guidance: (q?.guidance ?? '').trim() }))
+      .filter((q) => q.question && q.guidance);
+  };
+  const cleanQuant = (arr: any): QuantItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({
+        problem: (q?.problem ?? '').trim(),
+        stepSolution: (q?.stepSolution ?? '').trim(),
+        finalAnswer: (q?.finalAnswer ?? '').trim(),
+      }))
+      .filter((q) => q.problem && q.stepSolution && q.finalAnswer)
+      .slice(0, 5);
+  };
+
+  const bundle: ExamBundle = {
+    multipleChoice: cleanMcq(raw?.multipleChoice),
+    identification: cleanId(raw?.identification),
+    enumeration: cleanEnum(raw?.enumeration),
+    shortAnswer: cleanShort(raw?.shortAnswer),
+    quantitative: cleanQuant(raw?.quantitative ?? []),
+  };
+
+  if (
+    bundle.multipleChoice.length === 0 &&
+    bundle.identification.length === 0 &&
+    bundle.enumeration.length === 0 &&
+    bundle.shortAnswer.length === 0 &&
+    bundle.quantitative.length === 0
+  ) return null;
+
+  return bundle;
+};
+
+const ExamCard = React.memo(function ExamCard({ item, index }: { item: ExamItem; index: number }) {
   const styles = useStyles();
   const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
@@ -81,7 +149,7 @@ function ExamCard({ item, index }: { item: ExamItem; index: number }) {
       )}
     </View>
   );
-}
+});
 
 export default function ExamScreen() {
   const styles = useStyles(); 
@@ -91,18 +159,28 @@ export default function ExamScreen() {
   const [pickedFile,  setPickedFile]  = useState<PickedFile | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>('idle');
   const [errorMsg,    setErrorMsg]    = useState('');
-  const [examResult,  setExamResult]  = useState<ExamItem[] | null>(null);
+  const [examResult,  setExamResult]  = useState<ExamBundle | null>(null);
+  const [toast, setToast] = useState<{ visible: boolean; type: ToastType; title: string; message: string }>({
+    visible: false,
+    type: 'info',
+    title: '',
+    message: '',
+  });
 
   const cardScale    = useRef(new Animated.Value(1)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
   const doneAnim     = useRef(new Animated.Value(0)).current;
   const glowAnim     = useRef(new Animated.Value(0)).current; // Glowing pulse animation
 
-  const MAX_DAILY_EXAMS = 1;
+  const MAX_DAILY_EXAMS = 2;
   const [examQuotaUsed, setExamQuotaUsed] = useState(0);
 
   const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
   const examsLeft = Math.max(0, MAX_DAILY_EXAMS - examQuotaUsed);
+
+  const showToast = (type: ToastType, title: string, message: string) => {
+    setToast({ visible: true, type, title, message });
+  };
 
   // Trigger pulse animation when file is loaded
   useEffect(() => {
@@ -123,6 +201,7 @@ export default function ExamScreen() {
       if (!user) return;
       const today = new Date().toLocaleDateString();
       try {
+        await migrateHistoryOnce();
         const storedDate = await AsyncStorage.getItem(`@studia_date_${user.id}`);
         if (storedDate !== today) {
           await AsyncStorage.setItem(`@studia_date_${user.id}`, today);
@@ -149,7 +228,7 @@ export default function ExamScreen() {
     if (!res.canceled) {
       const asset = res.assets[0];
       if (asset.size && asset.size > 5 * 1024 * 1024) {
-        Alert.alert("File Too Large", "Please upload a document smaller than 5MB to ensure the AI can process it quickly.");
+        showToast('info', 'File Too Large', 'Please upload a document smaller than 5MB so the AI can process it quickly.');
         return; 
       }
       setPickedFile({ name: asset.name, uri: asset.uri, size: asset.size ?? 0, mimeType: asset.mimeType ?? 'application/octet-stream' });
@@ -164,7 +243,7 @@ export default function ExamScreen() {
   const handleGenerateExam = async () => {
     if (!pickedFile || !user) return;
     if (examQuotaUsed >= MAX_DAILY_EXAMS) {
-      Alert.alert("Daily Limit Reached", "You have used your 1 free exam generation for today. Please come back tomorrow!");
+      showToast('info', 'Daily Limit Reached', 'You have used your 2 free exam generations for today. Please come back tomorrow.');
       return; 
     }
 
@@ -183,35 +262,61 @@ export default function ExamScreen() {
       
       animateProgress(0.55); setUploadState('analyzing'); animateProgress(0.75);
       
+      const invokeGenerateExam = async (token: string) => {
+        return supabase.functions.invoke('generate-exam', {
+          body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id },
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      };
+
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('No active session. Please log in again.');
-      
-      const { data: fnData, error: fnError } = await supabase.functions.invoke('generate-exam', {
-        body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id }, headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      
+      if (!session?.access_token) throw new Error('No active session. Please log in again.');
+
+      let { data: fnData, error: fnError } = await invokeGenerateExam(session.access_token);
+
+      const shouldRetryAuth =
+        !!fnError &&
+        (fnError.message?.toLowerCase().includes('401') ||
+          fnError.message?.toLowerCase().includes('unauthorized'));
+
+      if (shouldRetryAuth) {
+        const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+        if (refreshError || !refreshed.session?.access_token) {
+          throw new Error('Session expired. Please log in again.');
+        }
+        ({ data: fnData, error: fnError } = await invokeGenerateExam(refreshed.session.access_token));
+      }
+
       if (fnError) throw new Error(`Generation failed: ${fnError.message}`);
       if (!fnData?.success || !fnData?.exam) throw new Error(fnData?.error ?? 'Failed to generate 50 items.');
-      
-      animateProgress(1); setExamResult(fnData.exam);
+
+      const cleanedExam = cleanExamItems(fnData.exam);
+      if (!cleanedExam) throw new Error('Exam returned empty or invalid data');
+
+      const examTotalMs = Number(fnData?.stageTimings?.total_ms ?? 0);
+      const examGenerateMs = Number(fnData?.stageTimings?.generate_ms ?? 0);
+
+      animateProgress(1); setExamResult(cleanedExam);
 
       try {
         const newLesson = {
           id: Date.now().toString(),
           fileName: `[EXAM] ${pickedFile.name}`,
           date: new Date().toLocaleDateString(),
-          content: { summary: "50-Item Objective University Level Exam", keyConceptsList: [], flashcards: [], quiz: [], hardQuiz: fnData.exam }
+          content: { summary: "Mixed-format exam", keyConceptsList: [], flashcards: [], quiz: [], hardQuiz: [], exam: cleanedExam }
         };
-        const existingHistory = await AsyncStorage.getItem('@studia_history');
-        let historyArray = existingHistory ? JSON.parse(existingHistory) : [];
-        historyArray.unshift(newLesson);
-        await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
+        await prependHistoryEntry(newLesson, 100);
       } catch (storageError) { console.error("Offline save failed:", storageError); }
 
       const newQuota = examQuotaUsed + 1;
       setExamQuotaUsed(newQuota);
       await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, newQuota.toString());
       setUploadState('done'); showDoneBanner();
+      if (examTotalMs > 0) {
+        showToast('success', 'Exam Generated', `Ready in ${(examTotalMs / 1000).toFixed(1)}s (${examGenerateMs}ms generation).`);
+      } else {
+        showToast('success', 'Exam Generated', 'Your exam is ready. Open the sections below and start practicing.');
+      }
 
     } catch (err: any) {
       setUploadState('error'); console.error("Exam generation error:", err);
@@ -223,14 +328,17 @@ export default function ExamScreen() {
       const isJsonError = structuredErrorType === 'json_parse_error' || (!structuredErrorType && (errorMessage.includes('json') || errorMessage.includes('546')));
 
       if (isRateLimit || isTimeout || isJsonError) {
-        Alert.alert("Server is Catching its Breath!", "A lot of students are generating exams right now. Please wait 10 seconds and try again!");
+        showToast('error', 'Server Busy', 'A lot of students are generating exams right now. Please wait 10 seconds and try again.');
         setErrorMsg("Server busy. Please wait 10 seconds and retry.");
       } else if (errorMessage.includes('network') || errorMessage.includes('failed to fetch')) {
-        Alert.alert("No Internet Connection", "Please check your Wi-Fi or mobile data and try again.");
+        showToast('error', 'No Internet Connection', 'Please check your Wi-Fi or mobile data and try again.');
         setErrorMsg("No internet connection.");
+      } else if (errorMessage.includes('session expired') || errorMessage.includes('log in again') || errorMessage.includes('unauthorized') || errorMessage.includes('401')) {
+        showToast('info', 'Session Expired', 'Please sign in again, then retry generating your exam.');
+        setErrorMsg("Session expired. Please log in again.");
       } else {
-        Alert.alert("Generation Failed", "We couldn't generate the exam for this specific file. Please make sure it is a standard text-based PDF or DOCX.");
-        setErrorMsg("Failed to generate exam.");
+        showToast('error', 'Generation Failed', 'We could not generate the exam for this file. Use a standard text-based PDF or DOCX.');
+        setErrorMsg(err?.message || "Failed to generate exam.");
       }
       animateProgress(0);
     }
@@ -358,7 +466,7 @@ export default function ExamScreen() {
                     <View style={styles.doneIconWrap}><Feather name="check" size={18} color={colors.success} /></View>
                     <View>
                       <Text style={styles.doneBannerTitle}>Exam Generated!</Text>
-                      <Text style={styles.doneBannerSub}>Good luck on your 50-item test.</Text>
+                      <Text style={styles.doneBannerSub}>Good luck on your mixed-format exam.</Text>
                     </View>
                   </View>
                 </View>
@@ -366,10 +474,74 @@ export default function ExamScreen() {
 
               <View style={[styles.contentSection, { paddingHorizontal: 0, marginTop: 0 }]}>
                 <View style={styles.contentHeader}>
-                  <Text style={styles.contentTitle}>Final Examination ({examResult.length} items)</Text>
+                  <Text style={styles.contentTitle}>Final Examination (mixed format)</Text>
                 </View>
-                <View style={styles.quizList}>
-                  {examResult.map((q, i) => <ExamCard key={`exam-q-${i}`} item={q} index={i} />)}
+                <View style={{ gap: 16 }}>
+                  {examResult.multipleChoice.length > 0 && (
+                    <View style={{ gap: 10 }}>
+                      <Text style={styles.sectionLabel}>Multiple Choice ({examResult.multipleChoice.length})</Text>
+                      <View style={styles.quizList}>
+                        {examResult.multipleChoice.map((q, i) => <ExamCard key={`mc-${i}`} item={q} index={i} />)}
+                      </View>
+                    </View>
+                  )}
+
+                  {examResult.identification.length > 0 && (
+                    <View style={styles.sectionBlock}>
+                      <Text style={styles.sectionLabel}>Identification ({examResult.identification.length})</Text>
+                      {examResult.identification.map((q, i) => (
+                        <View key={`id-${i}`} style={styles.textItemCard}>
+                          <Text style={styles.textItemQuestion}>{i + 1}. {q.question}</Text>
+                          <Text style={styles.textItemAnswerLabel}>Expected answer</Text>
+                          <Text style={styles.textItemAnswer}>{q.expectedAnswer}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {examResult.enumeration.length > 0 && (
+                    <View style={styles.sectionBlock}>
+                      <Text style={styles.sectionLabel}>Enumeration ({examResult.enumeration.length})</Text>
+                      {examResult.enumeration.map((q, i) => (
+                        <View key={`enum-${i}`} style={styles.textItemCard}>
+                          <Text style={styles.textItemQuestion}>{i + 1}. {q.question}</Text>
+                          <View style={styles.enumList}>
+                            {q.items.map((item, idx) => (
+                              <Text key={`enum-${i}-${idx}`} style={styles.enumItem}>• {item}</Text>
+                            ))}
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {examResult.shortAnswer.length > 0 && (
+                    <View style={styles.sectionBlock}>
+                      <Text style={styles.sectionLabel}>Short Answer ({examResult.shortAnswer.length})</Text>
+                      {examResult.shortAnswer.map((q, i) => (
+                        <View key={`short-${i}`} style={styles.textItemCard}>
+                          <Text style={styles.textItemQuestion}>{i + 1}. {q.question}</Text>
+                          <Text style={styles.textItemAnswerLabel}>Guidance</Text>
+                          <Text style={styles.textItemAnswer}>{q.guidance}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  {examResult.quantitative.length > 0 && (
+                    <View style={styles.sectionBlock}>
+                      <Text style={styles.sectionLabel}>Quantitative ({examResult.quantitative.length})</Text>
+                      {examResult.quantitative.map((q, i) => (
+                        <View key={`quant-${i}`} style={styles.textItemCard}>
+                          <Text style={styles.textItemQuestion}>{i + 1}. {q.problem}</Text>
+                          <Text style={styles.textItemAnswerLabel}>Solution Steps</Text>
+                          <Text style={styles.textItemAnswer}>{q.stepSolution}</Text>
+                          <Text style={styles.textItemAnswerLabel}>Final Answer</Text>
+                          <Text style={styles.textItemAnswer}>{q.finalAnswer}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
                 </View>
               </View>
             </View>
@@ -377,6 +549,13 @@ export default function ExamScreen() {
 
         </ScrollView>
       </SafeAreaView>
+      <AppToast
+        visible={toast.visible}
+        type={toast.type}
+        title={toast.title}
+        message={toast.message}
+        onHide={() => setToast((prev) => ({ ...prev, visible: false }))}
+      />
     </View>
   );
 }
@@ -447,6 +626,14 @@ const useStyles = () => {
     quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18 },
     quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : colors.background, borderRadius: 10, padding: 10 },
     quizExplanationText: { fontSize: 12, color: colors.textDim, flex: 1, lineHeight: 17 },
+    sectionLabel: { fontSize: 16, fontWeight: '700', color: colors.text },
+    sectionBlock: { gap: 10 },
+    textItemCard: { backgroundColor: colors.cardBg, borderRadius: 12, borderWidth: 1, borderColor: colors.border, padding: 12, gap: 6 },
+    textItemQuestion: { color: colors.text, fontSize: 14, fontWeight: '600', lineHeight: 20 },
+    textItemAnswerLabel: { color: colors.textDim, fontSize: 12, fontWeight: '600' },
+    textItemAnswer: { color: colors.text, fontSize: 13, lineHeight: 18 },
+    enumList: { gap: 4, marginTop: 4 },
+    enumItem: { color: colors.text, fontSize: 13, lineHeight: 18 },
     doneBanner: { backgroundColor: isDark ? 'rgba(52,199,138,0.08)' : '#ECFDF5', borderRadius: 16, borderWidth: 1, borderColor: isDark ? 'rgba(52,199,138,0.2)' : '#D1FAE5', padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
     doneBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
     doneIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: isDark ? 'rgba(52,199,138,0.12)' : '#D1FAE5', alignItems: 'center', justifyContent: 'center' },

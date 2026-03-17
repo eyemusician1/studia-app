@@ -1,4 +1,9 @@
 
+[functions.analyze-material]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/analyze-material/index.ts"
+
 [functions.generate-exam]
 enabled = true
 verify_jwt = true

@@ -1,0 +1,5 @@
+[functions.analyze-material]
+verify_jwt = true
+
+[functions.generate-exam]
+verify_jwt = true

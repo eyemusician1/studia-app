@@ -2,19 +2,30 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, StatusBar,
-  Platform, ScrollView, ActivityIndicator, Modal, SafeAreaView as RNSafeAreaView
+  Platform, ScrollView, ActivityIndicator, Modal, SafeAreaView as RNSafeAreaView, FlatList
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext'; // <-- NEW IMPORT
+import { migrateHistoryOnce, replaceHistoryEntries } from '../lib/historyStorage';
 
 const ACCENT = '#3B6FD4';
 
 type Concept        = { term: string; definition: string };
 type Flashcard      = { question: string; answer: string };
 type QuizItem       = { question: string; options: string[]; correctIndex: number; explanation: string };
+type IdItem         = { question: string; expectedAnswer: string };
+type EnumItem       = { question: string; items: string[] };
+type ShortItem      = { question: string; guidance: string };
+type QuantItem      = { problem: string; stepSolution: string; finalAnswer: string };
+type ExamBundle     = {
+  multipleChoice: QuizItem[];
+  identification: IdItem[];
+  enumeration: EnumItem[];
+  shortAnswer: ShortItem[];
+  quantitative: QuantItem[];
+};
 type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz' | 'hardQuiz' | 'exam';
 
 type OfflineLesson = {
@@ -27,12 +38,50 @@ type OfflineLesson = {
     flashcards: Flashcard[];
     quiz: QuizItem[];
     hardQuiz?: QuizItem[];
-    exam?: QuizItem[];
+    exam?: QuizItem[] | ExamBundle;
   };
 };
 
+function isExamBundle(exam: any): exam is ExamBundle {
+  return !!exam && typeof exam === 'object' && Array.isArray(exam.multipleChoice);
+}
+
+function examItemCount(exam: QuizItem[] | ExamBundle | undefined): number {
+  if (!exam) return 0;
+  if (Array.isArray(exam)) return exam.length;
+  return (
+    (exam.multipleChoice?.length ?? 0) +
+    (exam.identification?.length ?? 0) +
+    (exam.enumeration?.length ?? 0) +
+    (exam.shortAnswer?.length ?? 0) +
+    (exam.quantitative?.length ?? 0)
+  );
+}
+
+function normalizeLesson(raw: any): OfflineLesson | null {
+  if (!raw || typeof raw !== 'object') return null;
+  if (!raw.id || !raw.fileName) return null;
+
+  const content = raw.content ?? {};
+  return {
+    id: String(raw.id),
+    fileName: String(raw.fileName),
+    date: String(raw.date ?? ''),
+    content: {
+      summary: typeof content.summary === 'string' ? content.summary : '',
+      keyConceptsList: Array.isArray(content.keyConceptsList) ? content.keyConceptsList : [],
+      flashcards: Array.isArray(content.flashcards) ? content.flashcards : [],
+      quiz: Array.isArray(content.quiz) ? content.quiz : [],
+      hardQuiz: Array.isArray(content.hardQuiz) ? content.hardQuiz : [],
+      exam: Array.isArray(content.exam) || isExamBundle(content.exam) ? content.exam : undefined,
+    },
+  };
+}
+
 function timeAgo(timestampId: string) {
-  const diff = Date.now() - parseInt(timestampId);
+  const parsed = Number(timestampId);
+  if (!Number.isFinite(parsed)) return 'Recently';
+  const diff = Date.now() - parsed;
   const mins  = Math.floor(diff / 60000);
   const hours = Math.floor(diff / 3600000);
   const days  = Math.floor(diff / 86400000);
@@ -46,7 +95,7 @@ function fileIcon(name: string) {
   return name.toLowerCase().endsWith('.pdf') ? 'file-text' : 'file';
 }
 
-function FlashCard({ card }: { card: Flashcard }) {
+const FlashCard = React.memo(function FlashCard({ card }: { card: Flashcard }) {
   const styles = useStyles();
   const [flipped, setFlipped] = useState(false);
   return (
@@ -56,9 +105,9 @@ function FlashCard({ card }: { card: Flashcard }) {
       <Text style={styles.flashCardTap}>Tap to {flipped ? 'see question' : 'reveal answer'}</Text>
     </TouchableOpacity>
   );
-}
+});
 
-function QuizCard({ item, index }: { item: QuizItem; index: number }) {
+const QuizCard = React.memo(function QuizCard({ item, index }: { item: QuizItem; index: number }) {
   const styles = useStyles();
   const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
@@ -98,7 +147,7 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
       )}
     </View>
   );
-}
+});
 
 export default function HistoryScreen() {
   const styles = useStyles();
@@ -120,9 +169,9 @@ export default function HistoryScreen() {
   const loadOfflineHistory = async () => {
     setLoading(true);
     try {
-      const localData = await AsyncStorage.getItem('@studia_history');
-      if (localData) setResults(JSON.parse(localData));
-      else setResults([]);
+      const migrated = await migrateHistoryOnce();
+      const normalized = migrated.map(normalizeLesson).filter(Boolean) as OfflineLesson[];
+      setResults(normalized);
     } catch (error) { console.error("Failed to load offline history", error); }
     setLoading(false);
   };
@@ -134,7 +183,7 @@ export default function HistoryScreen() {
     try {
       const updatedResults = results.filter(r => r.id !== deleteCandidate.id);
       setResults(updatedResults);
-      await AsyncStorage.setItem('@studia_history', JSON.stringify(updatedResults));
+      await replaceHistoryEntries(updatedResults);
     } catch (error) { console.error("Failed to delete lesson", error); } 
     finally { setDeleteCandidate(null); }
   };
@@ -149,7 +198,7 @@ export default function HistoryScreen() {
       { key: 'hardQuiz'  as ActiveView, icon: 'award',        label: 'Hard Quiz',  desc: '5 Challenge questions', count: studySession.content.hardQuiz?.length || 0 },
     ];
     if (studySession.content.exam) {
-      cards.push({ key: 'exam' as ActiveView, icon: 'file-text', label: 'Final Exam', desc: '50-Item Challenge', count: studySession.content.exam.length });
+      cards.push({ key: 'exam' as ActiveView, icon: 'file-text', label: 'Final Exam', desc: 'Mixed-format challenge', count: examItemCount(studySession.content.exam) });
     }
     return cards;
   };
@@ -200,7 +249,7 @@ export default function HistoryScreen() {
                     <View style={styles.cardBody}>
                       <View style={styles.divider} />
                       <Text style={styles.summaryLabel}>Summary Preview</Text>
-                      <Text style={styles.summaryText} numberOfLines={3}>{item.content.summary}</Text>
+                      <Text style={styles.summaryText} numberOfLines={3}>{item.content.summary || 'No summary available for this file.'}</Text>
                       
                       <View style={styles.actionRow}>
                         <TouchableOpacity style={styles.studyBtn} onPress={() => { setStudySession(item); setActiveView(null); }} activeOpacity={0.8}>
@@ -277,10 +326,137 @@ export default function HistoryScreen() {
 
               {activeView === 'summary' && studySession && ( <View style={styles.summaryBox}><Text style={styles.summaryTextBody}>{studySession.content.summary}</Text></View> )}
               {activeView === 'concepts' && studySession && ( <View style={styles.conceptsList}>{studySession.content.keyConceptsList?.map((c, i) => ( <View key={`concept-${i}`} style={styles.conceptItem}><View style={styles.conceptDot} /><View style={styles.conceptContent}><Text style={styles.conceptTerm}>{c.term}</Text><Text style={styles.conceptDef}>{c.definition}</Text></View></View> ))}</View> )}
-              {activeView === 'flashcards' && studySession && ( <View style={styles.flashList}>{studySession.content.flashcards?.map((fc, i) => <FlashCard key={`flashcard-${i}`} card={fc} />)}</View> )}
-              {activeView === 'quiz' && studySession && ( <View style={styles.quizList}>{studySession.content.quiz?.map((q, i) => <QuizCard key={`quiz-${i}`} item={q} index={i} />)}</View> )}
-              {activeView === 'hardQuiz' && studySession && ( <View style={styles.quizList}>{studySession.content.hardQuiz?.map((q, i) => <QuizCard key={`hard-quiz-${i}`} item={q} index={i} />)}</View> )}
-              {activeView === 'exam' && studySession && ( <View style={styles.quizList}>{studySession.content.exam?.map((q, i) => <QuizCard key={`exam-q-${i}`} item={q} index={i} />)}</View> )}
+              {activeView === 'flashcards' && studySession && (
+                <View style={styles.flashList}>
+                  <FlatList
+                    data={studySession.content.flashcards ?? []}
+                    keyExtractor={(_, i) => `flashcard-${i}`}
+                    renderItem={({ item }) => <FlashCard card={item} />}
+                    ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
+                    scrollEnabled={false}
+                    removeClippedSubviews
+                    initialNumToRender={8}
+                    windowSize={7}
+                  />
+                </View>
+              )}
+              {activeView === 'quiz' && studySession && (
+                <View style={styles.quizList}>
+                  <FlatList
+                    data={studySession.content.quiz ?? []}
+                    keyExtractor={(_, i) => `quiz-${i}`}
+                    renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                    ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+                    scrollEnabled={false}
+                    removeClippedSubviews
+                    initialNumToRender={6}
+                    windowSize={7}
+                  />
+                </View>
+              )}
+              {activeView === 'hardQuiz' && studySession && (
+                <View style={styles.quizList}>
+                  <FlatList
+                    data={studySession.content.hardQuiz ?? []}
+                    keyExtractor={(_, i) => `hard-quiz-${i}`}
+                    renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                    ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+                    scrollEnabled={false}
+                    removeClippedSubviews
+                    initialNumToRender={6}
+                    windowSize={7}
+                  />
+                </View>
+              )}
+              {activeView === 'exam' && studySession && (
+                Array.isArray(studySession.content.exam) ? (
+                  <View style={styles.quizList}>
+                    <FlatList
+                      data={studySession.content.exam}
+                      keyExtractor={(_, i) => `exam-q-${i}`}
+                      renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                      ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+                      scrollEnabled={false}
+                      removeClippedSubviews
+                      initialNumToRender={8}
+                      windowSize={7}
+                    />
+                  </View>
+                ) : isExamBundle(studySession.content.exam) ? (
+                  <View style={{ gap: 14 }}>
+                    {studySession.content.exam.multipleChoice.length > 0 && (
+                      <View style={styles.sectionBlock}>
+                        <Text style={styles.sectionLabel}>Multiple Choice ({studySession.content.exam.multipleChoice.length})</Text>
+                        <FlatList
+                          data={studySession.content.exam.multipleChoice}
+                          keyExtractor={(_, i) => `exam-mc-${i}`}
+                          renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                          ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+                          scrollEnabled={false}
+                          removeClippedSubviews
+                          initialNumToRender={8}
+                          windowSize={7}
+                        />
+                      </View>
+                    )}
+
+                    {studySession.content.exam.identification.length > 0 && (
+                      <View style={styles.sectionBlock}>
+                        <Text style={styles.sectionLabel}>Identification ({studySession.content.exam.identification.length})</Text>
+                        {studySession.content.exam.identification.map((q, i) => (
+                          <View key={`exam-id-${i}`} style={styles.textItemCard}>
+                            <Text style={styles.textItemQuestion}>{i + 1}. {q.question}</Text>
+                            <Text style={styles.textItemAnswerLabel}>Expected answer</Text>
+                            <Text style={styles.textItemAnswer}>{q.expectedAnswer}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {studySession.content.exam.enumeration.length > 0 && (
+                      <View style={styles.sectionBlock}>
+                        <Text style={styles.sectionLabel}>Enumeration ({studySession.content.exam.enumeration.length})</Text>
+                        {studySession.content.exam.enumeration.map((q, i) => (
+                          <View key={`exam-enum-${i}`} style={styles.textItemCard}>
+                            <Text style={styles.textItemQuestion}>{i + 1}. {q.question}</Text>
+                            <View style={styles.enumList}>
+                              {q.items.map((entry, idx) => <Text key={`exam-enum-${i}-${idx}`} style={styles.enumItem}>• {entry}</Text>)}
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {studySession.content.exam.shortAnswer.length > 0 && (
+                      <View style={styles.sectionBlock}>
+                        <Text style={styles.sectionLabel}>Short Answer ({studySession.content.exam.shortAnswer.length})</Text>
+                        {studySession.content.exam.shortAnswer.map((q, i) => (
+                          <View key={`exam-short-${i}`} style={styles.textItemCard}>
+                            <Text style={styles.textItemQuestion}>{i + 1}. {q.question}</Text>
+                            <Text style={styles.textItemAnswerLabel}>Guidance</Text>
+                            <Text style={styles.textItemAnswer}>{q.guidance}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {studySession.content.exam.quantitative.length > 0 && (
+                      <View style={styles.sectionBlock}>
+                        <Text style={styles.sectionLabel}>Quantitative ({studySession.content.exam.quantitative.length})</Text>
+                        {studySession.content.exam.quantitative.map((q, i) => (
+                          <View key={`exam-quant-${i}`} style={styles.textItemCard}>
+                            <Text style={styles.textItemQuestion}>{i + 1}. {q.problem}</Text>
+                            <Text style={styles.textItemAnswerLabel}>Solution Steps</Text>
+                            <Text style={styles.textItemAnswer}>{q.stepSolution}</Text>
+                            <Text style={styles.textItemAnswerLabel}>Final Answer</Text>
+                            <Text style={styles.textItemAnswer}>{q.finalAnswer}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                ) : null
+              )}
 
             </ScrollView>
           </RNSafeAreaView>
@@ -387,5 +563,14 @@ const useStyles = () => {
     quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
     quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : colors.background, borderRadius: 10, padding: 10 },
     quizExplanationText: { fontSize: 12, color: colors.textDim, flex: 1, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+    sectionLabel: { fontSize: 16, fontWeight: '700', color: colors.text, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    sectionBlock: { gap: 10 },
+    textItemCard: { backgroundColor: colors.cardBg, borderRadius: 12, borderWidth: 1, borderColor: colors.border, padding: 12, gap: 6 },
+    textItemQuestion: { color: colors.text, fontSize: 14, fontWeight: '600', lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    textItemAnswerLabel: { color: colors.textDim, fontSize: 12, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    textItemAnswer: { color: colors.text, fontSize: 13, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    enumList: { gap: 4, marginTop: 4 },
+    enumItem: { color: colors.text, fontSize: 13, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
   });
 };

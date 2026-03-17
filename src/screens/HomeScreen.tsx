@@ -2,7 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, StatusBar,
-  Platform, Animated, Easing, ActivityIndicator, ScrollView, Dimensions, Alert, Image
+  Platform, Animated, Easing, ActivityIndicator, ScrollView, Dimensions, Image, FlatList
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
@@ -15,6 +15,8 @@ import { decode } from 'base64-arraybuffer';
 import { useStudyReminders } from '../hooks/useStudyReminders';
 import LottieView from 'lottie-react-native';
 import { useTheme } from '../context/ThemeContext'; // <-- NEW IMPORT
+import AppToast, { ToastType } from '../components/AppToast';
+import { migrateHistoryOnce, patchHistoryEntryById, prependHistoryEntry } from '../lib/historyStorage';
 
 const ACCENT  = '#3B6FD4';
 const SW      = Dimensions.get('window').width;
@@ -25,7 +27,12 @@ type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz' | 'h
 type Concept        = { term: string; definition: string };
 type Flashcard      = { question: string; answer: string };
 type QuizItem       = { question: string; options: string[]; correctIndex: number; explanation: string };
-type AnalysisResult = { summary: string; keyConceptsList: Concept[]; flashcards: Flashcard[]; quiz: QuizItem[]; hardQuiz: QuizItem[]; exam?: QuizItem[] };
+type IdItem         = { question: string; expectedAnswer: string };
+type EnumItem       = { question: string; items: string[] };
+type ShortItem      = { question: string; guidance: string };
+type QuantItem      = { problem: string; stepSolution: string; finalAnswer: string };
+type ExamBundle     = { multipleChoice: QuizItem[]; identification: IdItem[]; enumeration: EnumItem[]; shortAnswer: ShortItem[]; quantitative: QuantItem[] };
+type AnalysisResult = { summary: string; keyConceptsList: Concept[]; flashcards: Flashcard[]; quiz: QuizItem[]; hardQuiz: QuizItem[]; exam?: ExamBundle };
 
 function formatBytes(b: number) {
   if (b < 1024) return `${b} B`;
@@ -39,7 +46,64 @@ const parseQuotaValue = (value: string | null): number => {
   return Number.isFinite(numeric) ? numeric : 0;
 };
 
-function FlashCard({ card }: { card: Flashcard }) {
+const cleanExamBundle = (raw: any): ExamBundle | null => {
+  const cleanMcq = (arr: any): QuizItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({
+        question: (q?.question ?? '').trim(),
+        options: Array.isArray(q?.options) ? q.options.map((o: any) => (typeof o === 'string' ? o.trim() : '')).slice(0, 4) : [],
+        correctIndex: typeof q?.correctIndex === 'number' ? q.correctIndex : -1,
+        explanation: (q?.explanation ?? '').trim(),
+      }))
+      .filter((q) => q.question && q.explanation && q.options.length === 4 && q.correctIndex >= 0 && q.correctIndex < 4);
+  };
+  const cleanId = (arr: any): IdItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({ question: (q?.question ?? '').trim(), expectedAnswer: (q?.expectedAnswer ?? '').trim() }))
+      .filter((q) => q.question && q.expectedAnswer);
+  };
+  const cleanEnum = (arr: any): EnumItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({ question: (q?.question ?? '').trim(), items: Array.isArray(q?.items) ? q.items.map((i: any) => (typeof i === 'string' ? i.trim() : '')).filter((i: string) => i) : [] }))
+      .filter((q) => q.question && q.items.length >= 3);
+  };
+  const cleanShort = (arr: any): ShortItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({ question: (q?.question ?? '').trim(), guidance: (q?.guidance ?? '').trim() }))
+      .filter((q) => q.question && q.guidance);
+  };
+  const cleanQuant = (arr: any): QuantItem[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((q) => ({ problem: (q?.problem ?? '').trim(), stepSolution: (q?.stepSolution ?? '').trim(), finalAnswer: (q?.finalAnswer ?? '').trim() }))
+      .filter((q) => q.problem && q.stepSolution && q.finalAnswer)
+      .slice(0, 5);
+  };
+
+  const bundle: ExamBundle = {
+    multipleChoice: cleanMcq(raw?.multipleChoice),
+    identification: cleanId(raw?.identification),
+    enumeration: cleanEnum(raw?.enumeration),
+    shortAnswer: cleanShort(raw?.shortAnswer),
+    quantitative: cleanQuant(raw?.quantitative ?? []),
+  };
+
+  if (
+    bundle.multipleChoice.length === 0 &&
+    bundle.identification.length === 0 &&
+    bundle.enumeration.length === 0 &&
+    bundle.shortAnswer.length === 0 &&
+    bundle.quantitative.length === 0
+  ) return null;
+
+  return bundle;
+};
+
+const FlashCard = React.memo(function FlashCard({ card }: { card: Flashcard }) {
   const styles = useStyles();
   const [flipped, setFlipped] = useState(false);
   return (
@@ -49,9 +113,9 @@ function FlashCard({ card }: { card: Flashcard }) {
       <Text style={styles.flashCardTap}>Tap to {flipped ? 'see question' : 'reveal answer'}</Text>
     </TouchableOpacity>
   );
-}
+});
 
-function QuizCard({ item, index }: { item: QuizItem; index: number }) {
+const QuizCard = React.memo(function QuizCard({ item, index }: { item: QuizItem; index: number }) {
   const styles = useStyles();
   const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
@@ -91,7 +155,7 @@ function QuizCard({ item, index }: { item: QuizItem; index: number }) {
       )}
     </View>
   );
-}
+});
 
 export default function HomeScreen() {
   const styles = useStyles(); // <-- NEW: Dynamic Styles
@@ -107,13 +171,19 @@ export default function HomeScreen() {
   const [errorMsg,    setErrorMsg]    = useState('');
   const [result,      setResult]      = useState<AnalysisResult | null>(null);
   const [activeView,  setActiveView]  = useState<ActiveView>(null);
+  const [toast, setToast] = useState<{ visible: boolean; type: ToastType; title: string; message: string }>({
+    visible: false,
+    type: 'info',
+    title: '',
+    message: '',
+  });
 
   const [uploadedFilePath, setUploadedFilePath] = useState<string | null>(null);
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
   const [isGeneratingExam, setIsGeneratingExam] = useState(false);
 
   const MAX_DAILY_UPLOADS = 3;
-  const MAX_DAILY_EXAMS   = 1;
+  const MAX_DAILY_EXAMS   = 2;
   const [uploadQuotaUsed, setUploadQuotaUsed] = useState(0);
   const [examQuotaUsed, setExamQuotaUsed]     = useState(0);
 
@@ -123,6 +193,10 @@ export default function HomeScreen() {
   const glowAnim     = useRef(new Animated.Value(0)).current; 
 
   const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
+
+  const showToast = (type: ToastType, title: string, message: string) => {
+    setToast({ visible: true, type, title, message });
+  };
 
   useEffect(() => {
     if (pickedFile && !isWorking && uploadState !== 'done') {
@@ -138,6 +212,7 @@ export default function HomeScreen() {
       if (!user) return;
       const today = new Date().toLocaleDateString();
       try {
+        await migrateHistoryOnce();
         const storedDate = await AsyncStorage.getItem(`@studia_date_${user.id}`);
         if (storedDate !== today) {
           await AsyncStorage.setItem(`@studia_date_${user.id}`, today);
@@ -165,14 +240,14 @@ export default function HomeScreen() {
 
   const handlePick = async () => {
     bumpScale();
-    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) { Alert.alert("Daily Limit Reached", "You have used your 3 free uploads for today."); return; }
+    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) { showToast('info', 'Daily Limit Reached', 'You have used your 3 free uploads for today.'); return; }
     const res = await DocumentPicker.getDocumentAsync({ 
       type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.ms-powerpoint'], 
       copyToCacheDirectory: true 
     });
     if (!res.canceled) {
       const asset = res.assets[0];
-      if (asset.size && asset.size > 5 * 1024 * 1024) { Alert.alert("File Too Large", "Please upload a document smaller than 5MB."); return; }
+      if (asset.size && asset.size > 5 * 1024 * 1024) { showToast('info', 'File Too Large', 'Please upload a document smaller than 5MB.'); return; }
       setPickedFile({ name: asset.name, uri: asset.uri, size: asset.size ?? 0, mimeType: asset.mimeType ?? 'application/octet-stream' });
       setUploadState('idle'); setResult(null); setActiveView(null); setErrorMsg(''); setUploadedFilePath(null); setCurrentHistoryId(null); progressAnim.setValue(0); doneAnim.setValue(0);
     }
@@ -182,7 +257,7 @@ export default function HomeScreen() {
 
   const handleAnalyze = async () => {
     if (!pickedFile || !user) return;
-    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) { Alert.alert("Daily Limit Reached", "You have used your 3 free document uploads for today."); return; }
+    if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) { showToast('info', 'Daily Limit Reached', 'You have used your 3 free document uploads for today.'); return; }
     try {
       setUploadState('uploading'); animateProgress(0.15);
       const nameParts = pickedFile.name.split('.');
@@ -198,68 +273,173 @@ export default function HomeScreen() {
       if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
       
       animateProgress(0.55); setUploadState('analyzing'); animateProgress(0.75);
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('No active session.');
+      let { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error('No active session. Please sign in again.');
+
+      const tokenStillFresh = (s: any) => {
+        const expiresAtMs = Number(s?.expires_at ?? 0) * 1000;
+        return Number.isFinite(expiresAtMs) && expiresAtMs > Date.now() + 60_000;
+      };
+
+      // Force-refresh once so edge functions with verify_jwt receive a valid token.
+      try {
+        const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+        if (!refreshError && refreshed.session?.access_token) {
+          session = refreshed.session;
+        } else if (!tokenStillFresh(session)) {
+          throw new Error(refreshError?.message || 'Session refresh failed');
+        }
+      } catch (e: any) {
+        throw new Error(`Session expired. Please log in again. ${e?.message ?? ''}`.trim());
+      }
       
-      const { data: fnData, error: fnError } = await supabase.functions.invoke('analyze-material', {
-        body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id }, headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      if (fnError) throw new Error(`Analysis failed: ${fnError.message}`);
-      if (!fnData?.success) throw new Error(fnData?.error ?? 'Analysis returned no data');
+      const invokeOnce = async (token: string) => {
+        return supabase.functions.invoke('analyze-material', {
+          body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id },
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      };
+
+      let { data: fnData, error: fnError } = await invokeOnce(session.access_token);
+
+      const firstStatus = Number((fnError as any)?.context?.status ?? 0);
+
+      const shouldRetryAuth =
+        !!fnError &&
+        (firstStatus === 401 ||
+          fnError.message?.toLowerCase().includes('401') ||
+          fnError.message?.toLowerCase().includes('unauthorized'));
+
+      if (shouldRetryAuth) {
+        const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+        if (refreshError || !refreshed.session?.access_token) {
+          throw new Error('Session expired. Please log in again.');
+        }
+        session = refreshed.session;
+        ({ data: fnData, error: fnError } = await invokeOnce(session.access_token));
+      }
+
+      if (fnError) {
+        console.error('analyze-material invoke error', {
+          message: fnError.message,
+          status: (fnError as any)?.context?.status,
+          body: (fnError as any)?.context?.body,
+        });
+        if ((fnError as any)?.context?.status === 401) {
+          showToast('info', 'Session Expired', 'Please log in again and retry the upload.');
+        }
+        throw new Error(`Analysis failed: ${fnError.message}`);
+      }
+      if (!fnData?.success) {
+        console.error('analyze-material returned failure', fnData);
+        throw new Error(fnData?.error ?? 'Analysis returned no data');
+      }
       animateProgress(1);
 
       const generatedData = { summary: fnData.summary, keyConceptsList: fnData.keyConceptsList ?? [], flashcards: fnData.flashcards ?? [], quiz: fnData.quiz ?? [], hardQuiz: fnData.hardQuiz ?? [] };
       setResult(generatedData);
 
+      const analysisTotalMs = Number(fnData?.stageTimings?.total_ms ?? 0);
+      const analysisGenerateMs = Number(fnData?.stageTimings?.generate_ms ?? 0);
+
       try {
         const historyId = Date.now().toString();
         setCurrentHistoryId(historyId); 
         const newLesson = { id: historyId, fileName: pickedFile.name, date: new Date().toLocaleDateString(), content: generatedData };
-        const existingHistory = await AsyncStorage.getItem('@studia_history');
-        let historyArray = existingHistory ? JSON.parse(existingHistory) : [];
-        historyArray.unshift(newLesson);
-        await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
+        await prependHistoryEntry(newLesson, 100);
       } catch (e) { console.error("History save failed:", e); }
 
       const newUploadQuota = uploadQuotaUsed + 1;
       setUploadQuotaUsed(newUploadQuota);
       await AsyncStorage.setItem(`@studia_upload_quota_${user.id}`, newUploadQuota.toString());
       setUploadState('done'); setActiveView(null); showDoneBanner();
+      if (analysisTotalMs > 0) {
+        showToast('success', 'Analysis Complete', `Ready in ${(analysisTotalMs / 1000).toFixed(1)}s (${analysisGenerateMs}ms generation).`);
+      } else {
+        showToast('success', 'Analysis Complete', 'Study materials are ready. Choose a section to start learning.');
+      }
     } catch (err: any) {
       setUploadState('error'); console.error("Upload error:", err);
       const structuredErrorType = err?.errorType ?? err?.code ?? null;
-      if (structuredErrorType === 'quota_exceeded') { Alert.alert("Daily Limit Reached", "Limit reached. Come back tomorrow!"); animateProgress(0); return; }
-      Alert.alert("Analysis Failed", "Could not process this file."); setErrorMsg("Failed to read document."); animateProgress(0);
+      if (structuredErrorType === 'quota_exceeded') { showToast('info', 'Daily Limit Reached', 'Limit reached. Come back tomorrow.'); animateProgress(0); return; }
+      const rawMessage = String(err?.message ?? 'Could not process this file.');
+      const userMessage = rawMessage.replace(/^Analysis failed:\s*/i, '').slice(0, 180);
+      const lower = userMessage.toLowerCase();
+      if (lower.includes('session expired') || lower.includes('log in again') || lower.includes('unauthorized') || lower.includes('401')) {
+        showToast('info', 'Session Expired', 'Please sign in again, then retry upload.');
+      } else {
+        showToast('error', 'Analysis Failed', userMessage || 'Could not process this file.');
+      }
+      setErrorMsg(userMessage || 'Failed to read document.');
+      animateProgress(0);
     }
   };
 
   const handleGenerateExam = async () => {
-    if (!uploadedFilePath || !currentHistoryId) { Alert.alert("Error", "Missing file data."); return; }
-    if (examQuotaUsed >= MAX_DAILY_EXAMS) { Alert.alert("Daily Limit Reached", "You have used your 1 free exam generation for today."); return; }
+    if (!uploadedFilePath || !currentHistoryId) { showToast('error', 'Missing Data', 'File data is incomplete. Please analyze the file again.'); return; }
+    if (examQuotaUsed >= MAX_DAILY_EXAMS) { showToast('info', 'Daily Limit Reached', 'You have used your 2 free exam generations for today.'); return; }
     try {
       setIsGeneratingExam(true);
+      const invokeGenerateExam = async (token: string) => {
+        return supabase.functions.invoke('generate-exam', {
+          body: { storagePath: uploadedFilePath, fileName: pickedFile?.name, userId: user?.id },
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      };
+
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('No active session.');
-      const { data: fnData, error: fnError } = await supabase.functions.invoke('generate-exam', {
-        body: { storagePath: uploadedFilePath, fileName: pickedFile?.name, userId: user?.id }, headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      if (fnError || !fnData?.success) throw new Error("Failed to generate exam.");
-      setResult(prev => prev ? { ...prev, exam: fnData.exam } : null);
-      
-      const existingHistoryStr = await AsyncStorage.getItem('@studia_history');
-      if (existingHistoryStr) {
-        let historyArray = JSON.parse(existingHistoryStr);
-        const index = historyArray.findIndex((item: any) => item.id === currentHistoryId);
-        if (index !== -1) {
-          historyArray[index].content.exam = fnData.exam;
-          await AsyncStorage.setItem('@studia_history', JSON.stringify(historyArray));
+      if (!session?.access_token) throw new Error('No active session.');
+
+      let { data: fnData, error: fnError } = await invokeGenerateExam(session.access_token);
+
+      const shouldRetryAuth =
+        !!fnError &&
+        (fnError.message?.toLowerCase().includes('401') ||
+          fnError.message?.toLowerCase().includes('unauthorized'));
+
+      if (shouldRetryAuth) {
+        const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+        if (refreshError || !refreshed.session?.access_token) {
+          throw new Error('Session expired. Please log in again.');
         }
+        ({ data: fnData, error: fnError } = await invokeGenerateExam(refreshed.session.access_token));
+      }
+
+      if (fnError || !fnData?.success) throw new Error("Failed to generate exam.");
+      const cleanedExam = cleanExamBundle(fnData.exam);
+      if (!cleanedExam) throw new Error('Exam returned empty or invalid data');
+      setResult(prev => prev ? { ...prev, exam: cleanedExam } : null);
+
+      const examTotalMs = Number(fnData?.stageTimings?.total_ms ?? 0);
+      const examGenerateMs = Number(fnData?.stageTimings?.generate_ms ?? 0);
+      
+      try {
+        await patchHistoryEntryById(currentHistoryId, (entry) => ({
+          ...entry,
+          content: {
+            ...(entry?.content ?? {}),
+            exam: cleanedExam,
+          },
+        }));
+      } catch (historyErr) {
+        // Exam generation succeeded; history sync failure should not surface as generation failure.
+        console.error('History exam update failed:', historyErr);
       }
       setExamQuotaUsed(examQuotaUsed + 1);
       await AsyncStorage.setItem(`@studia_exam_quota_${user.id}`, (examQuotaUsed + 1).toString());
       setActiveView('exam');
+      if (examTotalMs > 0) {
+        showToast('success', 'Exam Ready', `Generated in ${(examTotalMs / 1000).toFixed(1)}s (${examGenerateMs}ms generation).`);
+      } else {
+        showToast('success', 'Exam Ready', 'Your exam has been generated successfully.');
+      }
     } catch (err: any) {
-      Alert.alert("Generation Failed", "Something went wrong.");
+      const msg = err?.message?.toLowerCase() || '';
+      if (msg.includes('session expired') || msg.includes('log in again') || msg.includes('unauthorized') || msg.includes('401')) {
+        showToast('info', 'Session Expired', 'Please sign in again, then retry generating your exam.');
+      } else {
+        showToast('error', 'Generation Failed', 'Something went wrong while generating your exam.');
+      }
     } finally { setIsGeneratingExam(false); }
   };
 
@@ -272,7 +452,7 @@ export default function HomeScreen() {
     { key: 'flashcards'as ActiveView, icon: 'layers',       label: 'Flashcards', desc: 'Q&A study cards',     count: result?.flashcards.length },
     { key: 'quiz'      as ActiveView, icon: 'check-square', label: 'Quiz',       desc: 'Test your knowledge', count: result?.quiz.length },
     { key: 'hardQuiz'  as ActiveView, icon: 'award',        label: 'Hard Quiz',  desc: '5 Challenge questions', count: result?.hardQuiz?.length },
-    { key: 'exam'      as ActiveView, icon: 'file-text',    label: 'Final Exam', desc: result?.exam ? 'University Level' : `${examsLeft} remaining today`, count: result?.exam?.length, isLocked: !result?.exam && examQuotaUsed >= MAX_DAILY_EXAMS },
+    { key: 'exam'      as ActiveView, icon: 'file-text',    label: 'Final Exam', desc: result?.exam ? 'Mixed format' : `${examsLeft} remaining today (resets daily)`, count: result?.exam ? undefined : undefined, isLocked: !result?.exam && examQuotaUsed >= MAX_DAILY_EXAMS },
   ];
 
   return (
@@ -385,7 +565,7 @@ export default function HomeScreen() {
                         {OUTPUT_CARDS.map((card) => {
                           const isLocked = card.isLocked;
                           return (
-                            <TouchableOpacity key={card.key} style={[styles.outputCard, isLocked && styles.outputCardLocked]} onPress={() => { if (card.key === 'exam' && !result?.exam) { if (isLocked) Alert.alert("Limit Reached", "You have already used your 1 exam generation for today."); else handleGenerateExam(); } else { setActiveView(card.key); } }} activeOpacity={isLocked ? 1 : 0.8}>
+                            <TouchableOpacity key={card.key} style={[styles.outputCard, isLocked && styles.outputCardLocked]} onPress={() => { if (card.key === 'exam' && !result?.exam) { if (isLocked) showToast('info', 'Limit Reached', 'You have already used your 2 exam generations for today.'); else handleGenerateExam(); } else { setActiveView(card.key); } }} activeOpacity={isLocked ? 1 : 0.8}>
                               <View style={styles.outputCardTop}>
                                 <View style={[styles.outputIconWrap, isLocked && styles.outputIconWrapLocked]}><Feather name={isLocked ? "lock" : card.icon as any} size={20} color={isLocked ? colors.textDim : ACCENT} /></View>
                                 {!isLocked && <Feather name="arrow-right" size={14} color={colors.border} />}
@@ -409,7 +589,7 @@ export default function HomeScreen() {
                         loop 
                         style={{ width: 160, height: 160 }} 
                       />
-                      <Text style={styles.generatingText}>The cat is generating your Exam...</Text>
+                      <Text style={styles.generatingText}>The AI is generating your exam...</Text>
                       <Text style={styles.generatingSubText}>Please wait</Text>
                     </View>
                   )}
@@ -419,15 +599,129 @@ export default function HomeScreen() {
                       <View style={styles.contentHeader}>
                         <TouchableOpacity style={styles.backBtn} onPress={() => setActiveView(null)}><Feather name="arrow-left" size={15} color={colors.text} /></TouchableOpacity>
                         <Text style={styles.contentTitle}>
-                          {activeView === 'summary' ? 'Summary' : activeView === 'concepts' ? `Key Concepts · ${result.keyConceptsList.length}` : activeView === 'flashcards'? `Flashcards · ${result.flashcards.length}` : activeView === 'quiz' ? `Quiz · ${result.quiz.length}` : activeView === 'exam' ? `Final Exam · ${result.exam?.length}` : `Hard Quiz · ${result.hardQuiz.length}`}
+                          {activeView === 'summary' ? 'Summary' : activeView === 'concepts' ? `Key Concepts · ${result.keyConceptsList.length}` : activeView === 'flashcards'? `Flashcards · ${result.flashcards.length}` : activeView === 'quiz' ? `Quiz · ${result.quiz.length}` : activeView === 'exam' ? 'Final Exam · Mixed Format' : `Hard Quiz · ${result.hardQuiz.length}`}
                         </Text>
                       </View>
                       {activeView === 'summary' && ( <View style={styles.summaryBox}><Text style={styles.summaryText}>{result.summary}</Text></View> )}
                       {activeView === 'concepts' && ( <View style={styles.conceptsList}>{result.keyConceptsList.map((c, i) => ( <View key={`concept-${i}`} style={styles.conceptItem}><View style={styles.conceptDot} /><View style={styles.conceptContent}><Text style={styles.conceptTerm}>{c.term}</Text><Text style={styles.conceptDef}>{c.definition}</Text></View></View> ))}</View> )}
-                      {activeView === 'flashcards' && ( <View style={styles.flashList}><View style={styles.hintRow}><Feather name="rotate-cw" size={11} color={colors.textDim} /><Text style={styles.hintText}>Tap a card to flip</Text></View>{result.flashcards.map((fc, i) => <FlashCard key={`flashcard-${i}`} card={fc} />)}</View> )}
-                      {activeView === 'quiz' && ( <View style={styles.quizList}><View style={styles.hintRow}><Feather name="target" size={11} color={colors.textDim} /><Text style={styles.hintText}>Tap an option to answer</Text></View>{result.quiz.map((q, i) => <QuizCard key={`quiz-${i}`} item={q} index={i} />)}</View> )}
-                      {activeView === 'hardQuiz' && ( <View style={styles.quizList}>{result.hardQuiz.map((q, i) => <QuizCard key={`hard-quiz-${i}`} item={q} index={i} />)}</View> )}
-                      {activeView === 'exam' && ( <View style={styles.quizList}><View style={styles.hintRow}><Feather name="award" size={11} color={colors.textDim} /><Text style={styles.hintText}>University Level Examination</Text></View>{result.exam?.map((q, i) => <QuizCard key={`exam-q-${i}`} item={q} index={i} />)}</View> )}
+                      {activeView === 'flashcards' && (
+                        <View style={styles.flashList}>
+                          <View style={styles.hintRow}><Feather name="rotate-cw" size={11} color={colors.textDim} /><Text style={styles.hintText}>Tap a card to flip</Text></View>
+                          <FlatList
+                            data={result.flashcards}
+                            keyExtractor={(_, i) => `flashcard-${i}`}
+                            renderItem={({ item }) => <FlashCard card={item} />}
+                            ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
+                            scrollEnabled={false}
+                            removeClippedSubviews
+                            initialNumToRender={8}
+                            windowSize={7}
+                          />
+                        </View>
+                      )}
+                      {activeView === 'quiz' && (
+                        <View style={styles.quizList}>
+                          <View style={styles.hintRow}><Feather name="target" size={11} color={colors.textDim} /><Text style={styles.hintText}>Tap an option to answer</Text></View>
+                          <FlatList
+                            data={result.quiz}
+                            keyExtractor={(_, i) => `quiz-${i}`}
+                            renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                            ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+                            scrollEnabled={false}
+                            removeClippedSubviews
+                            initialNumToRender={6}
+                            windowSize={7}
+                          />
+                        </View>
+                      )}
+                      {activeView === 'hardQuiz' && (
+                        <View style={styles.quizList}>
+                          <FlatList
+                            data={result.hardQuiz}
+                            keyExtractor={(_, i) => `hard-quiz-${i}`}
+                            renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                            ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+                            scrollEnabled={false}
+                            removeClippedSubviews
+                            initialNumToRender={6}
+                            windowSize={7}
+                          />
+                        </View>
+                      )}
+                      {activeView === 'exam' && result.exam && (
+                        <View style={{ gap: 14 }}>
+                          <View style={styles.hintRow}><Feather name="award" size={11} color={colors.textDim} /><Text style={styles.hintText}>Mixed-format examination</Text></View>
+
+                          {result.exam.multipleChoice.length > 0 && (
+                            <View style={{ gap: 8 }}>
+                              <Text style={styles.sectionLabel}>Multiple Choice ({result.exam.multipleChoice.length})</Text>
+                              <FlatList
+                                data={result.exam.multipleChoice}
+                                keyExtractor={(_, i) => `mc-${i}`}
+                                renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                                ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+                                scrollEnabled={false}
+                                removeClippedSubviews
+                                initialNumToRender={8}
+                                windowSize={7}
+                              />
+                            </View>
+                          )}
+
+                          {result.exam.identification.length > 0 && (
+                            <View style={styles.sectionBlock}>
+                              <Text style={styles.sectionLabel}>Identification ({result.exam.identification.length})</Text>
+                              {result.exam.identification.map((q, i) => (
+                                <View key={`id-${i}`} style={styles.textItemCard}>
+                                  <Text style={styles.textItemQuestion}>{i + 1}. {q.question}</Text>
+                                  <Text style={styles.textItemAnswerLabel}>Expected answer</Text>
+                                  <Text style={styles.textItemAnswer}>{q.expectedAnswer}</Text>
+                                </View>
+                              ))}
+                            </View>
+                          )}
+
+                          {result.exam.enumeration.length > 0 && (
+                            <View style={styles.sectionBlock}>
+                              <Text style={styles.sectionLabel}>Enumeration ({result.exam.enumeration.length})</Text>
+                              {result.exam.enumeration.map((q, i) => (
+                                <View key={`enum-${i}`} style={styles.textItemCard}>
+                                  <Text style={styles.textItemQuestion}>{i + 1}. {q.question}</Text>
+                                  <View style={styles.enumList}>{q.items.map((item, idx) => (<Text key={`enum-${i}-${idx}`} style={styles.enumItem}>• {item}</Text>))}</View>
+                                </View>
+                              ))}
+                            </View>
+                          )}
+
+                          {result.exam.shortAnswer.length > 0 && (
+                            <View style={styles.sectionBlock}>
+                              <Text style={styles.sectionLabel}>Short Answer ({result.exam.shortAnswer.length})</Text>
+                              {result.exam.shortAnswer.map((q, i) => (
+                                <View key={`short-${i}`} style={styles.textItemCard}>
+                                  <Text style={styles.textItemQuestion}>{i + 1}. {q.question}</Text>
+                                  <Text style={styles.textItemAnswerLabel}>Guidance</Text>
+                                  <Text style={styles.textItemAnswer}>{q.guidance}</Text>
+                                </View>
+                              ))}
+                            </View>
+                          )}
+
+                          {result.exam.quantitative.length > 0 && (
+                            <View style={styles.sectionBlock}>
+                              <Text style={styles.sectionLabel}>Quantitative ({result.exam.quantitative.length})</Text>
+                              {result.exam.quantitative.map((q, i) => (
+                                <View key={`quant-${i}`} style={styles.textItemCard}>
+                                  <Text style={styles.textItemQuestion}>{i + 1}. {q.problem}</Text>
+                                  <Text style={styles.textItemAnswerLabel}>Solution Steps</Text>
+                                  <Text style={styles.textItemAnswer}>{q.stepSolution}</Text>
+                                  <Text style={styles.textItemAnswerLabel}>Final Answer</Text>
+                                  <Text style={styles.textItemAnswer}>{q.finalAnswer}</Text>
+                                </View>
+                              ))}
+                            </View>
+                          )}
+                        </View>
+                      )}
                     </View>
                   )}
                 </>
@@ -437,6 +731,13 @@ export default function HomeScreen() {
 
         </ScrollView>
       </SafeAreaView>
+      <AppToast
+        visible={toast.visible}
+        type={toast.type}
+        title={toast.title}
+        message={toast.message}
+        onHide={() => setToast((prev) => ({ ...prev, visible: false }))}
+      />
     </View>
   );
 }
@@ -562,5 +863,14 @@ const useStyles = () => {
     quizOptionText:   { fontSize: 13, flex: 1, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
     quizExplanation:  { flexDirection: 'row', gap: 7, alignItems: 'flex-start', backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : colors.background, borderRadius: 10, padding: 10 },
     quizExplanationText: { fontSize: 12, color: colors.textDim, flex: 1, lineHeight: 17, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+
+    sectionLabel: { fontSize: 16, fontWeight: '700', color: colors.text, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    sectionBlock: { gap: 10 },
+    textItemCard: { backgroundColor: colors.cardBg, borderRadius: 12, borderWidth: 1, borderColor: colors.border, padding: 12, gap: 6 },
+    textItemQuestion: { color: colors.text, fontSize: 14, fontWeight: '600', lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    textItemAnswerLabel: { color: colors.textDim, fontSize: 12, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
+    textItemAnswer: { color: colors.text, fontSize: 13, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
+    enumList: { gap: 4, marginTop: 4 },
+    enumItem: { color: colors.text, fontSize: 13, lineHeight: 18, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
   });
 };

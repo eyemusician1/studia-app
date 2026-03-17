@@ -1,0 +1,2 @@
+[functions.analyze-material]
+verify_jwt = false
