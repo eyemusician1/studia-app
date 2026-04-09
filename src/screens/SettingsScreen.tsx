@@ -8,8 +8,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '../context/ThemeContext';
+import { clearHistoryEntries } from '../lib/historyStorage';
 
 interface RowProps {
   icon: string;
@@ -40,10 +40,10 @@ type AlertConfig = {
 };
 
 export default function SettingsScreen() {
-  const { signOut } = useAuth();
+  const { signOut, user } = useAuth();
   const { theme, toggleTheme, colors } = useTheme();
   const isDark = theme === 'dark';
-  
+
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertConfig, setAlertConfig] = useState<AlertConfig | null>(null);
 
@@ -60,7 +60,7 @@ export default function SettingsScreen() {
 
   const closeAlert = () => {
     setAlertVisible(false);
-    setTimeout(() => setAlertConfig(null), 300); 
+    setTimeout(() => setAlertConfig(null), 300);
   };
 
   const handleSignOut = () => {
@@ -81,7 +81,7 @@ export default function SettingsScreen() {
       confirmText: "Yes, clear it",
       onConfirm: async () => {
         try {
-          await AsyncStorage.removeItem('@studia_history');
+          await clearHistoryEntries(user?.id);
           setTimeout(() => {
             showAlert({ title: "Cleared!", message: "Your offline storage has been successfully emptied.", type: "info" });
           }, 400);
@@ -96,7 +96,7 @@ export default function SettingsScreen() {
 
   const handleNotifications = () => {
     showAlert({
-      title: "Notifications", 
+      title: "Notifications",
       message: "Push notifications for daily study reminders will be rolling out in the next major update!",
       type: "info"
     });
@@ -155,16 +155,16 @@ export default function SettingsScreen() {
 
           <Text style={[styles.sectionLabel, { color: colors.textDim }]}>App Options</Text>
           <View style={[styles.section, { backgroundColor: colors.sectionBg, borderColor: colors.border }]}>
-            
+
             {/* THEME TOGGLE */}
             <View style={styles.row}>
               <View style={[styles.rowIcon, { backgroundColor: colors.accentDim }]}>
                 <Feather name={isDark ? "moon" : "sun"} size={16} color={colors.accent} />
               </View>
               <Text style={[styles.rowLabel, { color: colors.text }]}>Dark Mode</Text>
-              <Switch 
-                value={isDark} 
-                onValueChange={toggleTheme} 
+              <Switch
+                value={isDark}
+                onValueChange={toggleTheme}
                 trackColor={{ false: '#D1D5DB', true: colors.accentDim }}
                 thumbColor={isDark ? colors.accent : '#f4f3f4'}
               />
@@ -187,7 +187,7 @@ export default function SettingsScreen() {
       <Modal visible={alertVisible} transparent animationType="fade" statusBarTranslucent onRequestClose={closeAlert}>
         <View style={styles.modalWrapper}>
           <TouchableOpacity style={styles.overlay} onPress={closeAlert} activeOpacity={1} />
-          
+
           <View style={[styles.alertCard, { backgroundColor: colors.cardBg, borderColor: colors.border }]}>
             <Text style={[styles.alertTitle, { color: colors.text }]}>{alertConfig?.title}</Text>
             <Text style={[styles.alertMessage, { color: colors.textDim }]}>{alertConfig?.message}</Text>
@@ -288,7 +288,7 @@ const styles = StyleSheet.create({
   rowIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   rowLabel: { flex: 1, fontSize: 15, fontWeight: '500', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
   divider: { height: 1, marginLeft: 64 },
-  
+
   // ── General Modal Styles ──
   modalWrapper: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 24 },
   overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)' },

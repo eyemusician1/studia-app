@@ -44,7 +44,7 @@ export default function ProfileScreen() {
   const styles = useStyles(); // <-- NEW: Dynamic Styles
   const { theme, colors } = useTheme();
   const { profile, user } = useAuth();
-  
+
   const [stats, setStats] = useState({ totalDocs: 0, totalFlashcards: 0, totalQuizzes: 0, totalConcepts: 0, totalExamItems: 0 });
   const [loading, setLoading] = useState(true);
   const [greeting, setGreeting] = useState('Welcome back');
@@ -66,7 +66,7 @@ export default function ProfileScreen() {
   const fetchOfflineStats = async () => {
     setLoading(true);
     try {
-      const history = await migrateHistoryOnce();
+      const history = await migrateHistoryOnce(user?.id);
       if (history.length > 0) {
         let fCount = 0; let qCount = 0; let cCount = 0; let examCount = 0;
         history.forEach((item: any) => {
@@ -118,7 +118,7 @@ export default function ProfileScreen() {
               <Text style={styles.avatarText}>{initials}</Text>
               <View style={styles.levelBadge}><Text style={styles.levelText}>Lvl {currentLevel}</Text></View>
             </View>
-            
+
             <Text style={styles.fullName}>{fullName}</Text>
             <Text style={styles.studentId}>Total XP: {totalXP}</Text>
 
@@ -219,7 +219,7 @@ const useStyles = () => {
     avatarText: { fontSize: 28, fontWeight: '700', color: colors.accent, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
     levelBadge: { position: 'absolute', bottom: -8, backgroundColor: colors.accent, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 2, borderColor: colors.cardBg },
     levelText: { color: '#FFF', fontSize: 10, fontWeight: '800', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
-    
+
     fullName: { fontSize: 18, fontWeight: '700', color: colors.text, letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }), marginTop: 6 },
     studentId: { fontSize: 13, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }), marginBottom: 12 },
 

@@ -1,5 +1,5 @@
 // src/screens/HomeScreen.tsx
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, StatusBar,
   Platform, Animated, Easing, ActivityIndicator, ScrollView, Dimensions, Image, FlatList
@@ -103,8 +103,7 @@ const cleanExamBundle = (raw: any): ExamBundle | null => {
   return bundle;
 };
 
-const FlashCard = React.memo(function FlashCard({ card }: { card: Flashcard }) {
-  const styles = useStyles();
+const FlashCard = React.memo(function FlashCard({ card, styles }: { card: Flashcard; styles: ReturnType<typeof useStyles> }) {
   const [flipped, setFlipped] = useState(false);
   return (
     <TouchableOpacity style={[styles.flashCard, flipped && styles.flashCardFlipped]} onPress={() => setFlipped(!flipped)} activeOpacity={0.85}>
@@ -115,10 +114,19 @@ const FlashCard = React.memo(function FlashCard({ card }: { card: Flashcard }) {
   );
 });
 
-const QuizCard = React.memo(function QuizCard({ item, index }: { item: QuizItem; index: number }) {
-  const styles = useStyles();
-  const { colors, theme } = useTheme();
-  const isDark = theme === 'dark';
+const QuizCard = React.memo(function QuizCard({
+  item,
+  index,
+  styles,
+  colors,
+  isDark,
+}: {
+  item: QuizItem;
+  index: number;
+  styles: ReturnType<typeof useStyles>;
+  colors: any;
+  isDark: boolean;
+}) {
   const [selected, setSelected] = useState<number | null>(null);
 
   return (
@@ -128,7 +136,7 @@ const QuizCard = React.memo(function QuizCard({ item, index }: { item: QuizItem;
         {item.options.map((opt, i) => {
           const isCorrect  = i === item.correctIndex;
           const isSelected = selected === i;
-          
+
           let bg = isDark ? 'rgba(255,255,255,0.04)' : colors.background;
           let border = colors.border;
           let color = colors.text;
@@ -160,6 +168,7 @@ const QuizCard = React.memo(function QuizCard({ item, index }: { item: QuizItem;
 export default function HomeScreen() {
   const styles = useStyles(); // <-- NEW: Dynamic Styles
   const { theme, colors } = useTheme();
+  const isDark = theme === 'dark';
   const { profile, user } = useAuth();
   const first    = (profile?.first_name ?? '').charAt(0) || '?';
   const last     = (profile?.last_name  ?? '').charAt(0) || '';
@@ -190,7 +199,7 @@ export default function HomeScreen() {
   const cardScale    = useRef(new Animated.Value(1)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
   const doneAnim     = useRef(new Animated.Value(0)).current;
-  const glowAnim     = useRef(new Animated.Value(0)).current; 
+  const glowAnim     = useRef(new Animated.Value(0)).current;
 
   const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
 
@@ -212,7 +221,7 @@ export default function HomeScreen() {
       if (!user) return;
       const today = new Date().toLocaleDateString();
       try {
-        await migrateHistoryOnce();
+        await migrateHistoryOnce(user.id);
         const storedDate = await AsyncStorage.getItem(`@studia_date_${user.id}`);
         if (storedDate !== today) {
           await AsyncStorage.setItem(`@studia_date_${user.id}`, today);
@@ -241,9 +250,9 @@ export default function HomeScreen() {
   const handlePick = async () => {
     bumpScale();
     if (uploadQuotaUsed >= MAX_DAILY_UPLOADS) { showToast('info', 'Daily Limit Reached', 'You have used your 3 free uploads for today.'); return; }
-    const res = await DocumentPicker.getDocumentAsync({ 
-      type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.ms-powerpoint'], 
-      copyToCacheDirectory: true 
+    const res = await DocumentPicker.getDocumentAsync({
+      type: ['application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.ms-powerpoint'],
+      copyToCacheDirectory: true
     });
     if (!res.canceled) {
       const asset = res.assets[0];
@@ -263,15 +272,15 @@ export default function HomeScreen() {
       const nameParts = pickedFile.name.split('.');
       const ext = nameParts.length > 1 ? nameParts[nameParts.length - 1] : null;
       const storagePath = ext ? `${user.id}/${Date.now()}.${ext}` : `${user.id}/${Date.now()}`;
-      setUploadedFilePath(storagePath); 
+      setUploadedFilePath(storagePath);
       animateProgress(0.35);
-      
+
       const base64Str = await FileSystem.readAsStringAsync(pickedFile.uri, { encoding: FileSystem.EncodingType.Base64 });
       const fileData = decode(base64Str);
-      
+
       const { data: uploadData, error: uploadError } = await supabase.storage.from('study-materials').upload(storagePath, fileData, { contentType: pickedFile.mimeType, upsert: false });
       if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
-      
+
       animateProgress(0.55); setUploadState('analyzing'); animateProgress(0.75);
       let { data: { session } } = await supabase.auth.getSession();
       if (!session?.access_token) throw new Error('No active session. Please sign in again.');
@@ -292,7 +301,7 @@ export default function HomeScreen() {
       } catch (e: any) {
         throw new Error(`Session expired. Please log in again. ${e?.message ?? ''}`.trim());
       }
-      
+
       const invokeOnce = async (token: string) => {
         return supabase.functions.invoke('analyze-material', {
           body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id },
@@ -344,9 +353,9 @@ export default function HomeScreen() {
 
       try {
         const historyId = Date.now().toString();
-        setCurrentHistoryId(historyId); 
+        setCurrentHistoryId(historyId);
         const newLesson = { id: historyId, fileName: pickedFile.name, date: new Date().toLocaleDateString(), content: generatedData };
-        await prependHistoryEntry(newLesson, 100);
+        await prependHistoryEntry(newLesson, 100, user.id);
       } catch (e) { console.error("History save failed:", e); }
 
       const newUploadQuota = uploadQuotaUsed + 1;
@@ -412,7 +421,7 @@ export default function HomeScreen() {
 
       const examTotalMs = Number(fnData?.stageTimings?.total_ms ?? 0);
       const examGenerateMs = Number(fnData?.stageTimings?.generate_ms ?? 0);
-      
+
       try {
         await patchHistoryEntryById(currentHistoryId, (entry) => ({
           ...entry,
@@ -420,7 +429,7 @@ export default function HomeScreen() {
             ...(entry?.content ?? {}),
             exam: cleanedExam,
           },
-        }));
+        }), user.id);
       } catch (historyErr) {
         // Exam generation succeeded; history sync failure should not surface as generation failure.
         console.error('History exam update failed:', historyErr);
@@ -446,14 +455,37 @@ export default function HomeScreen() {
   const uploadsLeft = Math.max(0, MAX_DAILY_UPLOADS - uploadQuotaUsed);
   const examsLeft   = Math.max(0, MAX_DAILY_EXAMS - examQuotaUsed);
 
-  const OUTPUT_CARDS = [
+  const showIdleUpload = !pickedFile;
+  const showFileSection = !!pickedFile;
+  const showWorking = showFileSection && isWorking;
+  const showReadyToAnalyze = showFileSection && !isWorking && uploadState !== 'done';
+  const showDoneState = showFileSection && uploadState === 'done';
+  const showDoneHeaderAction = showDoneState && activeView === null && !isGeneratingExam;
+  const showDoneMenu = showDoneState && !!result && activeView === null && !isGeneratingExam;
+  const showExamGeneratingOverlay = showDoneState && isGeneratingExam;
+  const showActiveContent = showDoneState && !!result && activeView !== null;
+
+  const OUTPUT_CARDS = useMemo(() => [
     { key: 'summary'   as ActiveView, icon: 'align-left',   label: 'Summary',    desc: 'Document overview',   count: null },
     { key: 'concepts'  as ActiveView, icon: 'tag',          label: 'Concepts',   desc: 'Key terms & ideas',   count: result?.keyConceptsList.length },
     { key: 'flashcards'as ActiveView, icon: 'layers',       label: 'Flashcards', desc: 'Q&A study cards',     count: result?.flashcards.length },
     { key: 'quiz'      as ActiveView, icon: 'check-square', label: 'Quiz',       desc: 'Test your knowledge', count: result?.quiz.length },
     { key: 'hardQuiz'  as ActiveView, icon: 'award',        label: 'Hard Quiz',  desc: '5 Challenge questions', count: result?.hardQuiz?.length },
-    { key: 'exam'      as ActiveView, icon: 'file-text',    label: 'Final Exam', desc: result?.exam ? 'Mixed format' : `${examsLeft} remaining today (resets daily)`, count: result?.exam ? undefined : undefined, isLocked: !result?.exam && examQuotaUsed >= MAX_DAILY_EXAMS },
-  ];
+    { key: 'exam'      as ActiveView, icon: 'file-text',    label: 'Final Exam', desc: result?.exam ? 'Mixed format' : `${examsLeft} remaining today (resets daily)`, count: undefined, isLocked: !result?.exam && examQuotaUsed >= MAX_DAILY_EXAMS },
+  ], [result, examsLeft, examQuotaUsed]);
+
+  const keyFlashcard = useCallback((_: Flashcard, i: number) => `flashcard-${i}`, []);
+  const keyQuiz = useCallback((_: QuizItem, i: number) => `quiz-${i}`, []);
+  const keyHardQuiz = useCallback((_: QuizItem, i: number) => `hard-quiz-${i}`, []);
+  const keyExamMc = useCallback((_: QuizItem, i: number) => `mc-${i}`, []);
+
+  const renderFlashcard = useCallback(({ item }: { item: Flashcard }) => <FlashCard card={item} styles={styles} />, [styles]);
+  const renderQuizItem = useCallback(
+    ({ item, index }: { item: QuizItem; index: number }) => (
+      <QuizCard item={item} index={index} styles={styles} colors={colors} isDark={isDark} />
+    ),
+    [styles, colors, isDark]
+  );
 
   return (
     <View style={styles.container}>
@@ -463,13 +495,13 @@ export default function HomeScreen() {
 
           <View style={styles.header}>
             <View style={styles.headerLeft}>
-              <Image source={require('../../assets/icon.png')} style={styles.logoImage} resizeMode="contain" />
+              <Image source={require('../../assets/studia.png')} style={styles.logoImage} resizeMode="contain" />
               <Text style={styles.appName}>Studia</Text>
             </View>
             <View style={styles.avatar}><Text style={styles.avatarText}>{initials}</Text></View>
           </View>
 
-          {!pickedFile && (
+          {showIdleUpload && (
             <View style={styles.idleContainer}>
               <Animated.View style={[styles.uploadCard, { transform: [{ scale: cardScale }] }]}>
                 <TouchableOpacity style={styles.uploadTouchable} onPress={handlePick} activeOpacity={1}>
@@ -493,9 +525,9 @@ export default function HomeScreen() {
             </View>
           )}
 
-          {pickedFile && (
+          {showFileSection && (
             <View style={styles.section}>
-              {isWorking && (
+              {showWorking && (
                 <View style={styles.workingContainer}>
                   <LottieView source={require('../../assets/scan.json')} autoPlay loop style={{ width: 280, height: 280 }} />
                   <Text style={styles.workingTitle}>{uploadState === 'uploading' ? 'Uploading Document...' : 'Analyzing File...'}</Text>
@@ -506,7 +538,7 @@ export default function HomeScreen() {
                 </View>
               )}
 
-              {!isWorking && uploadState !== 'done' && (
+                {showReadyToAnalyze && (
                  <View style={styles.readyContainer}>
                     <View style={styles.readyFilePreview}>
                       <View style={styles.readyFileIconWrap}><Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={32} color={ACCENT} /></View>
@@ -530,25 +562,26 @@ export default function HomeScreen() {
                  </View>
               )}
 
-              {uploadState === 'done' && (
+              {showDoneState && (
                 <>
                   <View style={styles.doneCompactCard}>
-                    {/* BACK BUTTON (Moved to the left side) */}
-                    <TouchableOpacity style={styles.newUploadBtn} onPress={handleRemove} activeOpacity={0.7}>
-                      <Feather name="arrow-left" size={20} color={colors.text} />
-                    </TouchableOpacity>
+                    {showDoneHeaderAction && (
+                      <TouchableOpacity style={styles.newUploadBtn} onPress={handleRemove} activeOpacity={0.7}>
+                        <Feather name="arrow-left" size={20} color={colors.text} />
+                      </TouchableOpacity>
+                    )}
 
                     <View style={styles.doneCompactIcon}>
                       <Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={20} color={ACCENT} />
                     </View>
-                    
+
                     <View style={styles.doneCompactMeta}>
                       <Text style={styles.doneCompactName} numberOfLines={1}>{pickedFile.name}</Text>
                       <Text style={styles.doneCompactSize}>{formatBytes(pickedFile.size)}</Text>
                     </View>
                   </View>
 
-                  {result && activeView === null && !isGeneratingExam && (
+                  {showDoneMenu && (
                     <View style={{ gap: 14 }}>
                       <Animated.View style={{ opacity: doneAnim, transform: [{ translateY: doneAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) }] }}>
                         <View style={styles.doneBanner}>
@@ -580,21 +613,21 @@ export default function HomeScreen() {
                     </View>
                   )}
 
-                  {isGeneratingExam && (
+                  {showExamGeneratingOverlay && (
                     <View style={styles.generatingOverlay}>
                       {/* --- UPDATED TO USE loading.json --- */}
-                      <LottieView 
-                        source={require('../../assets/loading.json')} 
-                        autoPlay 
-                        loop 
-                        style={{ width: 160, height: 160 }} 
+                      <LottieView
+                        source={require('../../assets/loading.json')}
+                        autoPlay
+                        loop
+                        style={{ width: 160, height: 160 }}
                       />
                       <Text style={styles.generatingText}>The AI is generating your exam...</Text>
                       <Text style={styles.generatingSubText}>Please wait</Text>
                     </View>
                   )}
 
-                  {result && activeView !== null && (
+                  {showActiveContent && (
                     <View style={styles.contentSection}>
                       <View style={styles.contentHeader}>
                         <TouchableOpacity style={styles.backBtn} onPress={() => setActiveView(null)}><Feather name="arrow-left" size={15} color={colors.text} /></TouchableOpacity>
@@ -609,8 +642,8 @@ export default function HomeScreen() {
                           <View style={styles.hintRow}><Feather name="rotate-cw" size={11} color={colors.textDim} /><Text style={styles.hintText}>Tap a card to flip</Text></View>
                           <FlatList
                             data={result.flashcards}
-                            keyExtractor={(_, i) => `flashcard-${i}`}
-                            renderItem={({ item }) => <FlashCard card={item} />}
+                            keyExtractor={keyFlashcard}
+                            renderItem={renderFlashcard}
                             ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
                             scrollEnabled={false}
                             removeClippedSubviews
@@ -624,8 +657,8 @@ export default function HomeScreen() {
                           <View style={styles.hintRow}><Feather name="target" size={11} color={colors.textDim} /><Text style={styles.hintText}>Tap an option to answer</Text></View>
                           <FlatList
                             data={result.quiz}
-                            keyExtractor={(_, i) => `quiz-${i}`}
-                            renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                            keyExtractor={keyQuiz}
+                            renderItem={renderQuizItem}
                             ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
                             scrollEnabled={false}
                             removeClippedSubviews
@@ -638,8 +671,8 @@ export default function HomeScreen() {
                         <View style={styles.quizList}>
                           <FlatList
                             data={result.hardQuiz}
-                            keyExtractor={(_, i) => `hard-quiz-${i}`}
-                            renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                            keyExtractor={keyHardQuiz}
+                            renderItem={renderQuizItem}
                             ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
                             scrollEnabled={false}
                             removeClippedSubviews
@@ -657,8 +690,8 @@ export default function HomeScreen() {
                               <Text style={styles.sectionLabel}>Multiple Choice ({result.exam.multipleChoice.length})</Text>
                               <FlatList
                                 data={result.exam.multipleChoice}
-                                keyExtractor={(_, i) => `mc-${i}`}
-                                renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                                keyExtractor={keyExamMc}
+                                renderItem={renderQuizItem}
                                 ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
                                 scrollEnabled={false}
                                 removeClippedSubviews
@@ -753,8 +786,8 @@ const useStyles = () => {
     scroll: { flexGrow: 1, paddingBottom: 56 },
 
     header: { paddingHorizontal: 24, paddingTop: 14, paddingBottom: 6, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-    headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 }, 
-    logoImage: { width: 32, height: 32, borderRadius: 8 }, 
+    headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    logoImage: { width: 40, height: 40, borderRadius: 0 },
     appName: { fontSize: 20, fontWeight: '800', color: colors.text, letterSpacing: -0.8, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-black' }) },
     avatar: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.accentDim, borderWidth: 1, borderColor: isDark ? 'rgba(59,111,212,0.22)' : colors.border, alignItems: 'center', justifyContent: 'center' },
     avatarText: { fontSize: 13, fontWeight: '700', color: colors.accent, letterSpacing: 0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
@@ -785,12 +818,12 @@ const useStyles = () => {
     readyFileSize: { fontSize: 13, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
     readyErrorBox: { flexDirection: 'row', backgroundColor: colors.dangerDim, borderWidth: 1, borderColor: isDark ? 'rgba(255,82,82,0.2)' : colors.danger, padding: 12, borderRadius: 12, gap: 8, width: '100%' },
     readyErrorText: { color: colors.danger, fontSize: 12, flex: 1, lineHeight: 18 },
-    
+
     analyzeBtnWrapper: { width: '100%', position: 'relative', marginTop: 10 },
     analyzeBtnGlow: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.accent, borderRadius: 20 },
     analyzeBtn: { backgroundColor: colors.accent, borderRadius: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 18, gap: 12 },
     analyzeBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', letterSpacing: 0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-bold' }) },
-    
+
     changeFileBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 },
     changeFileText: { color: colors.textDim, fontSize: 13, fontWeight: '500', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 

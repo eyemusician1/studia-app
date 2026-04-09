@@ -1,9 +1,9 @@
 // src/screens/ExamScreen.tsx
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, StatusBar,
   Platform, Animated, Easing, ActivityIndicator, ScrollView, Dimensions,
-  Image
+  Image, FlatList
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
@@ -18,7 +18,7 @@ import LottieView from 'lottie-react-native'; // <-- Lottie Imported Here
 import AppToast, { ToastType } from '../components/AppToast';
 import { migrateHistoryOnce, prependHistoryEntry } from '../lib/historyStorage';
 
-const ACCENT        = '#9B51E0'; // Purple accent 
+const ACCENT        = '#9B51E0'; // Purple accent
 const ACCENT_DIM    = 'rgba(155,81,224,0.10)';
 const ACCENT_BORDER = 'rgba(155,81,224,0.22)';
 const SW            = Dimensions.get('window').width;
@@ -105,10 +105,19 @@ const cleanExamItems = (raw: any): ExamBundle | null => {
   return bundle;
 };
 
-const ExamCard = React.memo(function ExamCard({ item, index }: { item: ExamItem; index: number }) {
-  const styles = useStyles();
-  const { colors, theme } = useTheme();
-  const isDark = theme === 'dark';
+const ExamCard = React.memo(function ExamCard({
+  item,
+  index,
+  styles,
+  colors,
+  isDark,
+}: {
+  item: ExamItem;
+  index: number;
+  styles: ReturnType<typeof useStyles>;
+  colors: any;
+  isDark: boolean;
+}) {
   const [selected, setSelected] = useState<number | null>(null);
 
   return (
@@ -118,7 +127,7 @@ const ExamCard = React.memo(function ExamCard({ item, index }: { item: ExamItem;
         {item.options.map((opt, i) => {
           const isCorrect  = i === item.correctIndex;
           const isSelected = selected === i;
-          
+
           let bg = isDark ? 'rgba(255,255,255,0.04)' : colors.background;
           let border = colors.border;
           let color = colors.text;
@@ -152,10 +161,11 @@ const ExamCard = React.memo(function ExamCard({ item, index }: { item: ExamItem;
 });
 
 export default function ExamScreen() {
-  const styles = useStyles(); 
+  const styles = useStyles();
   const { theme, colors } = useTheme();
+  const isDark = theme === 'dark';
   const { user } = useAuth();
-  
+
   const [pickedFile,  setPickedFile]  = useState<PickedFile | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>('idle');
   const [errorMsg,    setErrorMsg]    = useState('');
@@ -178,9 +188,25 @@ export default function ExamScreen() {
   const isWorking = uploadState === 'uploading' || uploadState === 'analyzing';
   const examsLeft = Math.max(0, MAX_DAILY_EXAMS - examQuotaUsed);
 
+  const showIdleUpload = !pickedFile;
+  const showFileSection = !!pickedFile;
+  const showWorking = showFileSection && isWorking;
+  const showReadyToGenerate = showFileSection && !isWorking && uploadState !== 'done';
+  const showDoneHeader = showFileSection && uploadState === 'done';
+  const showExamResult = !!examResult && uploadState === 'done';
+  const showDoneHeaderAction = showDoneHeader && !showExamResult;
+
   const showToast = (type: ToastType, title: string, message: string) => {
     setToast({ visible: true, type, title, message });
   };
+
+  const keyExamMc = useCallback((_: ExamItem, i: number) => `mc-${i}`, []);
+  const renderExamMc = useCallback(
+    ({ item, index }: { item: ExamItem; index: number }) => (
+      <ExamCard item={item} index={index} styles={styles} colors={colors} isDark={isDark} />
+    ),
+    [styles, colors, isDark]
+  );
 
   // Trigger pulse animation when file is loaded
   useEffect(() => {
@@ -201,7 +227,7 @@ export default function ExamScreen() {
       if (!user) return;
       const today = new Date().toLocaleDateString();
       try {
-        await migrateHistoryOnce();
+        await migrateHistoryOnce(user.id);
         const storedDate = await AsyncStorage.getItem(`@studia_date_${user.id}`);
         if (storedDate !== today) {
           await AsyncStorage.setItem(`@studia_date_${user.id}`, today);
@@ -229,7 +255,7 @@ export default function ExamScreen() {
       const asset = res.assets[0];
       if (asset.size && asset.size > 5 * 1024 * 1024) {
         showToast('info', 'File Too Large', 'Please upload a document smaller than 5MB so the AI can process it quickly.');
-        return; 
+        return;
       }
       setPickedFile({ name: asset.name, uri: asset.uri, size: asset.size ?? 0, mimeType: asset.mimeType ?? 'application/octet-stream' });
       setUploadState('idle'); setExamResult(null); setErrorMsg(''); progressAnim.setValue(0); doneAnim.setValue(0);
@@ -244,7 +270,7 @@ export default function ExamScreen() {
     if (!pickedFile || !user) return;
     if (examQuotaUsed >= MAX_DAILY_EXAMS) {
       showToast('info', 'Daily Limit Reached', 'You have used your 2 free exam generations for today. Please come back tomorrow.');
-      return; 
+      return;
     }
 
     try {
@@ -252,16 +278,16 @@ export default function ExamScreen() {
       const nameParts = pickedFile.name.split('.');
       const ext = nameParts.length > 1 ? nameParts[nameParts.length - 1] : null;
       const storagePath = ext ? `${user.id}/exams/${Date.now()}.${ext}` : `${user.id}/exams/${Date.now()}`;
-      
+
       animateProgress(0.35);
       const base64Str = await FileSystem.readAsStringAsync(pickedFile.uri, { encoding: FileSystem.EncodingType.Base64 });
       const fileData = decode(base64Str);
-      
+
       const { data: uploadData, error: uploadError } = await supabase.storage.from('study-materials').upload(storagePath, fileData, { contentType: pickedFile.mimeType, upsert: false });
       if (uploadError) throw new Error(`Upload failed: ${uploadError.message}`);
-      
+
       animateProgress(0.55); setUploadState('analyzing'); animateProgress(0.75);
-      
+
       const invokeGenerateExam = async (token: string) => {
         return supabase.functions.invoke('generate-exam', {
           body: { storagePath: uploadData.path, fileName: pickedFile.name, userId: user.id },
@@ -305,7 +331,7 @@ export default function ExamScreen() {
           date: new Date().toLocaleDateString(),
           content: { summary: "Mixed-format exam", keyConceptsList: [], flashcards: [], quiz: [], hardQuiz: [], exam: cleanedExam }
         };
-        await prependHistoryEntry(newLesson, 100);
+        await prependHistoryEntry(newLesson, 100, user.id);
       } catch (storageError) { console.error("Offline save failed:", storageError); }
 
       const newQuota = examQuotaUsed + 1;
@@ -355,7 +381,7 @@ export default function ExamScreen() {
             <Text style={styles.subtitle}>50-Item University Level</Text>
           </View>
 
-          {!pickedFile && (
+          {showIdleUpload && (
             <View>
               <Animated.View style={[styles.uploadCard, { transform: [{ scale: cardScale }] }]}>
                 <TouchableOpacity style={[styles.uploadTouchable, isWorking && { opacity: 0.5 }]} onPress={handlePick} activeOpacity={1} disabled={isWorking}>
@@ -373,19 +399,19 @@ export default function ExamScreen() {
             </View>
           )}
 
-          {pickedFile && (
+          {showFileSection && (
             <View style={styles.section}>
-              
+
               {/* STATE 2A: The massive Lottie Working screen using loading.json */}
-              {isWorking && (
+              {showWorking && (
                 <View style={styles.workingContainer}>
                   <LottieView source={require('../../assets/loading.json')} autoPlay loop style={{ width: 280, height: 280 }} />
                   <Text style={styles.workingTitle}>
                     {uploadState === 'uploading' ? 'Uploading Document...' : 'Generating Exam...'}
                   </Text>
                   <Text style={styles.workingSubtitle}>
-                    {uploadState === 'uploading' 
-                      ? `Securely sending ${pickedFile.name} to the cloud.` 
+                    {uploadState === 'uploading'
+                      ? `Securely sending ${pickedFile.name} to the cloud.`
                       : 'Drafting 50 challenging questions. This usually takes a minute.'}
                   </Text>
                   <View style={styles.largeProgressTrack}>
@@ -395,7 +421,7 @@ export default function ExamScreen() {
               )}
 
               {/* STATE 2B: The "Ready to Analyze" Redesigned Dock */}
-              {!isWorking && uploadState !== 'done' && (
+                {showReadyToGenerate && (
                  <View style={styles.readyContainer}>
                     <View style={styles.readyFilePreview}>
                       <View style={styles.readyFileIconWrap}>
@@ -420,9 +446,9 @@ export default function ExamScreen() {
                           opacity: glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] })
                         }
                       ]} />
-                      <TouchableOpacity 
-                        style={[styles.analyzeBtn, uploadState === 'error' && { backgroundColor: colors.danger }, examsLeft === 0 && { backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.1)' : colors.border }]} 
-                        onPress={handleGenerateExam} 
+                      <TouchableOpacity
+                        style={[styles.analyzeBtn, uploadState === 'error' && { backgroundColor: colors.danger }, examsLeft === 0 && { backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.1)' : colors.border }]}
+                        onPress={handleGenerateExam}
                         activeOpacity={0.85}
                         disabled={examsLeft === 0}
                       >
@@ -441,7 +467,7 @@ export default function ExamScreen() {
               )}
 
               {/* STATE 2C: Done Compact Header */}
-              {uploadState === 'done' && (
+              {showDoneHeader && (
                 <View style={styles.doneCompactCard}>
                   <View style={styles.doneCompactIcon}>
                     <Feather name={pickedFile.mimeType === 'application/pdf' ? 'file-text' : 'file'} size={20} color={ACCENT} />
@@ -450,15 +476,17 @@ export default function ExamScreen() {
                     <Text style={styles.doneCompactName} numberOfLines={1}>{pickedFile.name}</Text>
                     <Text style={styles.doneCompactSize}>{formatBytes(pickedFile.size)}</Text>
                   </View>
-                  <TouchableOpacity style={styles.newUploadBtn} onPress={handleRemove} activeOpacity={0.7}>
-                    <Feather name="trash-2" size={16} color={colors.textDim} />
-                  </TouchableOpacity>
+                  {showDoneHeaderAction && (
+                    <TouchableOpacity style={styles.newUploadBtn} onPress={handleRemove} activeOpacity={0.7}>
+                      <Feather name="trash-2" size={16} color={colors.textDim} />
+                    </TouchableOpacity>
+                  )}
                 </View>
               )}
             </View>
           )}
 
-          {examResult && uploadState === 'done' && (
+          {showExamResult && (
             <View style={{ gap: 14, paddingHorizontal: 24, marginTop: 20 }}>
               <Animated.View style={{ opacity: doneAnim, transform: [{ translateY: doneAnim.interpolate({ inputRange: [0, 1], outputRange: [15, 0] }) }] }}>
                 <View style={styles.doneBanner}>
@@ -481,7 +509,16 @@ export default function ExamScreen() {
                     <View style={{ gap: 10 }}>
                       <Text style={styles.sectionLabel}>Multiple Choice ({examResult.multipleChoice.length})</Text>
                       <View style={styles.quizList}>
-                        {examResult.multipleChoice.map((q, i) => <ExamCard key={`mc-${i}`} item={q} index={i} />)}
+                        <FlatList
+                          data={examResult.multipleChoice}
+                          keyExtractor={keyExamMc}
+                          renderItem={renderExamMc}
+                          ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
+                          scrollEnabled={false}
+                          removeClippedSubviews
+                          initialNumToRender={8}
+                          windowSize={7}
+                        />
                       </View>
                     </View>
                   )}
@@ -591,12 +628,12 @@ const useStyles = () => {
     readyFileSize: { fontSize: 13, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
     readyErrorBox: { flexDirection: 'row', backgroundColor: colors.dangerDim, borderWidth: 1, borderColor: isDark ? 'rgba(255,82,82,0.2)' : colors.danger, padding: 12, borderRadius: 12, gap: 8, width: '100%' },
     readyErrorText: { color: colors.danger, fontSize: 12, flex: 1, lineHeight: 18 },
-    
+
     analyzeBtnWrapper: { width: '100%', position: 'relative', marginTop: 10 },
     analyzeBtnGlow: { ...StyleSheet.absoluteFillObject, backgroundColor: ACCENT, borderRadius: 20 },
     analyzeBtn: { backgroundColor: ACCENT, borderRadius: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 18, gap: 12 },
     analyzeBtnText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', letterSpacing: 0.5, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-bold' }) },
-    
+
     changeFileBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 },
     changeFileText: { color: colors.textDim, fontSize: 13, fontWeight: '500', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
 
@@ -612,7 +649,7 @@ const useStyles = () => {
     workingSubtitle: { fontSize: 13, color: colors.textDim, textAlign: 'center', paddingHorizontal: 30, marginTop: 8, lineHeight: 20 },
     largeProgressTrack: { width: '80%', height: 6, borderRadius: 3, backgroundColor: colors.border, marginTop: 24, overflow: 'hidden' },
     largeProgressFill: { height: '100%', backgroundColor: ACCENT, borderRadius: 3 },
-    
+
     contentSection: { paddingHorizontal: 24, marginTop: 20, gap: 12 },
     contentHeader:  { paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
     contentTitle: { fontSize: 18, fontWeight: '700', color: colors.text },

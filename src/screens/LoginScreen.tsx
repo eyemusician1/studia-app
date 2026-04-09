@@ -91,7 +91,7 @@ export default function LoginScreen() {
   const styles = useStyles(); // <-- NEW: Dynamic Styles
   const { theme, colors } = useTheme();
   const isDark = theme === 'dark';
-  
+
   const navigation = useNavigation<LoginScreenNavigationProp>();
   const { signIn, signUp, user } = useAuth();
 
@@ -307,20 +307,20 @@ const useStyles = () => {
     modalWrapper: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 },
     overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.68)' },
     formCard: { width: '100%', backgroundColor: colors.cardBg, borderRadius: 20, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 24, paddingTop: 24, paddingBottom: 28, shadowColor: '#000', shadowOffset: { width: 0, height: 24 }, shadowOpacity: isDark ? 0.55 : 0.1, shadowRadius: 48, elevation: 24 },
-    
+
     formHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
     formTitle: { fontSize: 20, fontWeight: '600', color: colors.text, letterSpacing: -0.3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
     formSubtitle: { fontSize: 13, color: colors.textDim, marginTop: 3, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
     closeBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: isDark ? 'rgba(255,255,255,0.07)' : colors.background, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
     closeBtnText: { color: colors.textDim, fontSize: 11, fontWeight: '700' },
     divider: { height: 1, backgroundColor: colors.border, marginVertical: 20 },
-    
+
     fields: { gap: 16, marginBottom: 26 },
     nameRow: { flexDirection: 'row', gap: 12 },
     fieldWrap: { gap: 7 },
     fieldLabel: { fontSize: 11, fontWeight: '600', color: colors.textDim, letterSpacing: 0.8, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
     fieldInput: { backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : colors.background, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingVertical: 13, paddingHorizontal: 15, color: colors.text, fontSize: 15, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-    
+
     passwordContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : colors.background, borderWidth: 1, borderColor: colors.border, borderRadius: 10 },
     passwordInput: { flex: 1, paddingVertical: 13, paddingHorizontal: 15, color: colors.text, fontSize: 15, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
     eyeBtn: { padding: 13 },

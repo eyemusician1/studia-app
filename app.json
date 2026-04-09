@@ -5,10 +5,11 @@
     "scheme": "studia",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/studia.png",
     "userInterfaceStyle": "light",
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/studia.png",
+      "imageWidth": 220,
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
@@ -17,15 +18,16 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff" 
+        "foregroundImage": "./assets/studia.png",
+        "monochromeImage": "./assets/studia.png",
+        "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.saaayr07.Studia"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/studia.png"
     },
     "extra": {
       "eas": {
@@ -33,7 +35,7 @@
       }
     },
     "notification": {
-      "icon": "./assets/icon.png",
+      "icon": "./assets/studia.png",
       "color": "#3B6FD4"
     }
   }

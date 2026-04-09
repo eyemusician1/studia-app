@@ -1,5 +1,5 @@
 // src/screens/HistoryScreen.tsx
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, StatusBar,
   Platform, ScrollView, ActivityIndicator, Modal, SafeAreaView as RNSafeAreaView, FlatList
@@ -8,6 +8,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { useTheme } from '../context/ThemeContext'; // <-- NEW IMPORT
+import { useAuth } from '../context/AuthContext';
 import { migrateHistoryOnce, replaceHistoryEntries } from '../lib/historyStorage';
 
 const ACCENT = '#3B6FD4';
@@ -29,7 +30,7 @@ type ExamBundle     = {
 type ActiveView     = null | 'summary' | 'concepts' | 'flashcards' | 'quiz' | 'hardQuiz' | 'exam';
 
 type OfflineLesson = {
-  id: string; 
+  id: string;
   fileName: string;
   date: string;
   content: {
@@ -95,8 +96,7 @@ function fileIcon(name: string) {
   return name.toLowerCase().endsWith('.pdf') ? 'file-text' : 'file';
 }
 
-const FlashCard = React.memo(function FlashCard({ card }: { card: Flashcard }) {
-  const styles = useStyles();
+const FlashCard = React.memo(function FlashCard({ card, styles }: { card: Flashcard; styles: ReturnType<typeof useStyles> }) {
   const [flipped, setFlipped] = useState(false);
   return (
     <TouchableOpacity style={[styles.flashCard, flipped && styles.flashCardFlipped]} onPress={() => setFlipped(!flipped)} activeOpacity={0.85}>
@@ -107,10 +107,19 @@ const FlashCard = React.memo(function FlashCard({ card }: { card: Flashcard }) {
   );
 });
 
-const QuizCard = React.memo(function QuizCard({ item, index }: { item: QuizItem; index: number }) {
-  const styles = useStyles();
-  const { colors, theme } = useTheme();
-  const isDark = theme === 'dark';
+const QuizCard = React.memo(function QuizCard({
+  item,
+  index,
+  styles,
+  colors,
+  isDark,
+}: {
+  item: QuizItem;
+  index: number;
+  styles: ReturnType<typeof useStyles>;
+  colors: any;
+  isDark: boolean;
+}) {
   const [selected, setSelected] = useState<number | null>(null);
 
   return (
@@ -120,7 +129,7 @@ const QuizCard = React.memo(function QuizCard({ item, index }: { item: QuizItem;
         {item.options.map((opt, i) => {
           const isCorrect  = i === item.correctIndex;
           const isSelected = selected === i;
-          
+
           let bg = isDark ? 'rgba(255,255,255,0.04)' : colors.background;
           let border = colors.border;
           let color = colors.text;
@@ -149,46 +158,109 @@ const QuizCard = React.memo(function QuizCard({ item, index }: { item: QuizItem;
   );
 });
 
+const HistoryListItem = React.memo(function HistoryListItem({
+  item,
+  isOpen,
+  onToggle,
+  onStudy,
+  onDelete,
+}: {
+  item: OfflineLesson;
+  isOpen: boolean;
+  onToggle: (id: string, isOpen: boolean) => void;
+  onStudy: (lesson: OfflineLesson) => void;
+  onDelete: (id: string, fileName: string) => void;
+}) {
+  const styles = useStyles();
+  const { colors } = useTheme();
+
+  return (
+    <View style={styles.card}>
+      <TouchableOpacity style={styles.cardHeader} onPress={() => onToggle(item.id, isOpen)} activeOpacity={0.8}>
+        <View style={styles.fileIconWrap}><Feather name={fileIcon(item.fileName) as any} size={17} color={ACCENT} /></View>
+        <View style={styles.cardMeta}>
+          <Text style={styles.cardName} numberOfLines={1} ellipsizeMode="middle">{item.fileName}</Text>
+          <View style={styles.cardTagRow}>
+            <View style={styles.tag}><Feather name="layers" size={10} color={ACCENT} /><Text style={styles.tagText}>{item.content.flashcards?.length ?? 0}</Text></View>
+            <View style={styles.tag}><Feather name="check-square" size={10} color={ACCENT} /><Text style={styles.tagText}>{item.content.quiz?.length ?? 0}</Text></View>
+            <Text style={styles.timeAgo}>{timeAgo(item.id)}</Text>
+          </View>
+        </View>
+        <View style={styles.cardActions}><Feather name={isOpen ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textDim} /></View>
+      </TouchableOpacity>
+
+      {isOpen && (
+        <View style={styles.cardBody}>
+          <View style={styles.divider} />
+          <Text style={styles.summaryLabel}>Summary Preview</Text>
+          <Text style={styles.summaryText} numberOfLines={3}>{item.content.summary || 'No summary available for this file.'}</Text>
+          <View style={styles.actionRow}>
+            <TouchableOpacity style={styles.studyBtn} onPress={() => onStudy(item)} activeOpacity={0.8}>
+              <Feather name="play" size={14} color="#FFF" />
+              <Text style={styles.studyBtnText}>Study Now</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.deleteBtn} onPress={() => onDelete(item.id, item.fileName)} activeOpacity={0.7}>
+              <Feather name="trash-2" size={14} color={colors.danger} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+});
+
 export default function HistoryScreen() {
   const styles = useStyles();
   const { theme, colors } = useTheme();
+  const { user } = useAuth();
   const isDark = theme === 'dark';
 
   const [results, setResults]   = useState<OfflineLesson[]>([]);
   const [loading, setLoading]   = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
-  
+
   const [studySession, setStudySession] = useState<OfflineLesson | null>(null);
   const [activeView, setActiveView]     = useState<ActiveView>(null);
   const [deleteCandidate, setDeleteCandidate] = useState<{ id: string, fileName: string } | null>(null);
 
   useFocusEffect(
-    useCallback(() => { loadOfflineHistory(); }, [])
+    useCallback(() => { loadOfflineHistory(); }, [user?.id])
   );
 
   const loadOfflineHistory = async () => {
     setLoading(true);
     try {
-      const migrated = await migrateHistoryOnce();
+      const migrated = await migrateHistoryOnce(user?.id);
       const normalized = migrated.map(normalizeLesson).filter(Boolean) as OfflineLesson[];
       setResults(normalized);
     } catch (error) { console.error("Failed to load offline history", error); }
     setLoading(false);
   };
 
-  const handleDeleteClick = (id: string, fileName: string) => { setDeleteCandidate({ id, fileName }); };
+  const handleDeleteClick = useCallback((id: string, fileName: string) => {
+    setDeleteCandidate({ id, fileName });
+  }, []);
+
+  const handleToggleExpanded = useCallback((id: string, isOpen: boolean) => {
+    setExpanded(isOpen ? null : id);
+  }, []);
+
+  const handleStudy = useCallback((lesson: OfflineLesson) => {
+    setStudySession(lesson);
+    setActiveView(null);
+  }, []);
 
   const confirmDelete = async () => {
     if (!deleteCandidate) return;
     try {
       const updatedResults = results.filter(r => r.id !== deleteCandidate.id);
       setResults(updatedResults);
-      await replaceHistoryEntries(updatedResults);
-    } catch (error) { console.error("Failed to delete lesson", error); } 
+      await replaceHistoryEntries(updatedResults, user?.id);
+    } catch (error) { console.error("Failed to delete lesson", error); }
     finally { setDeleteCandidate(null); }
   };
 
-  const getOutputCards = () => {
+  const outputCards = useMemo(() => {
     if (!studySession) return [];
     const cards = [
       { key: 'summary'   as ActiveView, icon: 'align-left',   label: 'Summary',    desc: 'Document overview',   count: null },
@@ -201,7 +273,22 @@ export default function HistoryScreen() {
       cards.push({ key: 'exam' as ActiveView, icon: 'file-text', label: 'Final Exam', desc: 'Mixed-format challenge', count: examItemCount(studySession.content.exam) });
     }
     return cards;
-  };
+  }, [studySession]);
+
+  const keyExtractor = useCallback((item: OfflineLesson) => item.id, []);
+
+  const renderHistoryItem = useCallback(({ item }: { item: OfflineLesson }) => {
+    const isOpen = expanded === item.id;
+    return (
+      <HistoryListItem
+        item={item}
+        isOpen={isOpen}
+        onToggle={handleToggleExpanded}
+        onStudy={handleStudy}
+        onDelete={handleDeleteClick}
+      />
+    );
+  }, [expanded, handleDeleteClick, handleStudy, handleToggleExpanded]);
 
   return (
     <View style={styles.container}>
@@ -227,45 +314,20 @@ export default function HistoryScreen() {
             <Text style={styles.emptySub}>Your analyzed documents will appear here</Text>
           </View>
         ) : (
-          <ScrollView style={styles.list} contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
-            {results.map((item) => {
-              const isOpen = expanded === item.id;
-              return (
-                <View key={item.id} style={styles.card}>
-                  <TouchableOpacity style={styles.cardHeader} onPress={() => setExpanded(isOpen ? null : item.id)} activeOpacity={0.8}>
-                    <View style={styles.fileIconWrap}><Feather name={fileIcon(item.fileName) as any} size={17} color={ACCENT} /></View>
-                    <View style={styles.cardMeta}>
-                      <Text style={styles.cardName} numberOfLines={1} ellipsizeMode="middle">{item.fileName}</Text>
-                      <View style={styles.cardTagRow}>
-                        <View style={styles.tag}><Feather name="layers" size={10} color={ACCENT} /><Text style={styles.tagText}>{item.content.flashcards?.length ?? 0}</Text></View>
-                        <View style={styles.tag}><Feather name="check-square" size={10} color={ACCENT} /><Text style={styles.tagText}>{item.content.quiz?.length ?? 0}</Text></View>
-                        <Text style={styles.timeAgo}>{timeAgo(item.id)}</Text>
-                      </View>
-                    </View>
-                    <View style={styles.cardActions}><Feather name={isOpen ? 'chevron-up' : 'chevron-down'} size={16} color={colors.textDim} /></View>
-                  </TouchableOpacity>
-
-                  {isOpen && (
-                    <View style={styles.cardBody}>
-                      <View style={styles.divider} />
-                      <Text style={styles.summaryLabel}>Summary Preview</Text>
-                      <Text style={styles.summaryText} numberOfLines={3}>{item.content.summary || 'No summary available for this file.'}</Text>
-                      
-                      <View style={styles.actionRow}>
-                        <TouchableOpacity style={styles.studyBtn} onPress={() => { setStudySession(item); setActiveView(null); }} activeOpacity={0.8}>
-                          <Feather name="play" size={14} color="#FFF" />
-                          <Text style={styles.studyBtnText}>Study Now</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={styles.deleteBtn} onPress={() => handleDeleteClick(item.id, item.fileName)} activeOpacity={0.7}>
-                          <Feather name="trash-2" size={14} color={colors.danger} />
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  )}
-                </View>
-              );
-            })}
-          </ScrollView>
+          <FlatList
+            style={styles.list}
+            data={results}
+            keyExtractor={keyExtractor}
+            contentContainerStyle={styles.listContent}
+            showsVerticalScrollIndicator={false}
+            removeClippedSubviews
+            initialNumToRender={8}
+            maxToRenderPerBatch={8}
+            windowSize={9}
+            extraData={expanded}
+            ItemSeparatorComponent={() => <View style={styles.listSeparator} />}
+            renderItem={renderHistoryItem}
+          />
         )}
       </SafeAreaView>
 
@@ -277,7 +339,7 @@ export default function HistoryScreen() {
             <Text style={styles.alertDesc}>
               Are you sure you want to remove <Text style={{ fontWeight: 'bold', color: colors.text }}>"{deleteCandidate?.fileName}"</Text> from your history? This action cannot be undone.
             </Text>
-            
+
             <View style={styles.alertRow}>
               <TouchableOpacity style={styles.alertCancelBtn} onPress={() => setDeleteCandidate(null)} activeOpacity={0.7}>
                 <Text style={styles.alertCancelText}>Cancel</Text>
@@ -293,7 +355,7 @@ export default function HistoryScreen() {
       <Modal visible={!!studySession} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setStudySession(null)}>
         <View style={styles.modalContainer}>
           <RNSafeAreaView style={{ flex: 1 }}>
-            
+
             <View style={styles.modalHeader}>
               <TouchableOpacity onPress={() => activeView ? setActiveView(null) : setStudySession(null)} style={styles.modalBackBtn}>
                 <Feather name={activeView ? "arrow-left" : "x"} size={20} color={colors.text} />
@@ -305,10 +367,10 @@ export default function HistoryScreen() {
             </View>
 
             <ScrollView contentContainerStyle={styles.modalScroll}>
-              
+
               {!activeView && studySession && (
                 <View style={styles.outputGrid}>
-                  {getOutputCards().map((card) => (
+                  {outputCards.map((card) => (
                     <TouchableOpacity key={card.key} style={styles.outputCard} onPress={() => setActiveView(card.key)} activeOpacity={0.8}>
                       <View style={styles.outputCardTop}>
                         <View style={styles.outputIconWrap}><Feather name={card.icon as any} size={20} color={ACCENT} /></View>
@@ -331,7 +393,7 @@ export default function HistoryScreen() {
                   <FlatList
                     data={studySession.content.flashcards ?? []}
                     keyExtractor={(_, i) => `flashcard-${i}`}
-                    renderItem={({ item }) => <FlashCard card={item} />}
+                    renderItem={({ item }) => <FlashCard card={item} styles={styles} />}
                     ItemSeparatorComponent={() => <View style={{ height: 12 }} />}
                     scrollEnabled={false}
                     removeClippedSubviews
@@ -345,7 +407,7 @@ export default function HistoryScreen() {
                   <FlatList
                     data={studySession.content.quiz ?? []}
                     keyExtractor={(_, i) => `quiz-${i}`}
-                    renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                    renderItem={({ item, index }) => <QuizCard item={item} index={index} styles={styles} colors={colors} isDark={isDark} />}
                     ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
                     scrollEnabled={false}
                     removeClippedSubviews
@@ -359,7 +421,7 @@ export default function HistoryScreen() {
                   <FlatList
                     data={studySession.content.hardQuiz ?? []}
                     keyExtractor={(_, i) => `hard-quiz-${i}`}
-                    renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                    renderItem={({ item, index }) => <QuizCard item={item} index={index} styles={styles} colors={colors} isDark={isDark} />}
                     ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
                     scrollEnabled={false}
                     removeClippedSubviews
@@ -374,7 +436,7 @@ export default function HistoryScreen() {
                     <FlatList
                       data={studySession.content.exam}
                       keyExtractor={(_, i) => `exam-q-${i}`}
-                      renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                      renderItem={({ item, index }) => <QuizCard item={item} index={index} styles={styles} colors={colors} isDark={isDark} />}
                       ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
                       scrollEnabled={false}
                       removeClippedSubviews
@@ -390,7 +452,7 @@ export default function HistoryScreen() {
                         <FlatList
                           data={studySession.content.exam.multipleChoice}
                           keyExtractor={(_, i) => `exam-mc-${i}`}
-                          renderItem={({ item, index }) => <QuizCard item={item} index={index} />}
+                          renderItem={({ item, index }) => <QuizCard item={item} index={index} styles={styles} colors={colors} isDark={isDark} />}
                           ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
                           scrollEnabled={false}
                           removeClippedSubviews
@@ -487,7 +549,8 @@ const useStyles = () => {
     emptySub: { fontSize: 13, color: colors.textDim, textAlign: 'center', paddingHorizontal: 40, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
 
     list:        { flex: 1 },
-    listContent: { paddingHorizontal: 24, paddingTop: 8, paddingBottom: 40, gap: 12 },
+    listContent: { paddingHorizontal: 24, paddingTop: 8, paddingBottom: 40 },
+    listSeparator: { height: 12 },
 
     card: { backgroundColor: colors.cardBg, borderRadius: 18, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' },
     cardHeader:  { flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 },
@@ -504,7 +567,7 @@ const useStyles = () => {
     divider:     { height: 1, backgroundColor: colors.border, marginBottom: 4 },
     summaryLabel: { fontSize: 10, fontWeight: '600', color: colors.accent, letterSpacing: 1, textTransform: 'uppercase', marginBottom: -4, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
     summaryText: { fontSize: 13, color: colors.textDim, lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-    
+
     actionRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
     studyBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: colors.accent, paddingVertical: 10, borderRadius: 12 },
     studyBtnText: { color: '#FFF', fontSize: 13, fontWeight: '600', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
@@ -546,14 +609,14 @@ const useStyles = () => {
     conceptContent: { flex: 1, gap: 4 },
     conceptTerm:  { fontSize: 14, fontWeight: '600', color: colors.text, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
     conceptDef:   { fontSize: 13, color: colors.textDim, lineHeight: 19, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-    
+
     flashList: { gap: 12 },
     flashCard: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 20, gap: 10, alignItems: 'center', minHeight: 140, justifyContent: 'center' },
     flashCardFlipped: { backgroundColor: colors.accentDim },
     flashCardHint: { fontSize: 10, fontWeight: '600', color: colors.accent, letterSpacing: 1, textTransform: 'uppercase', fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
     flashCardText: { fontSize: 15, color: colors.text, textAlign: 'center', lineHeight: 22, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
     flashCardTap:  { fontSize: 11, color: colors.textDim, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif' }) },
-    
+
     quizList: { gap: 14 },
     quizCard: { backgroundColor: colors.cardBg, borderRadius: 16, borderWidth: 1, borderColor: colors.border, padding: 16, gap: 12 },
     quizQuestion: { fontSize: 14, fontWeight: '600', color: colors.text, lineHeight: 20, fontFamily: Platform.select({ ios: 'System', android: 'sans-serif-medium' }) },
